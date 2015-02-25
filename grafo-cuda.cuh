@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <thrust/fill.h>
 #include "fila-cuda.cuh"
 
 #define ADJACENTE(v, index) arestas[vertices[v].adjacentes[index]]
@@ -122,6 +123,12 @@ typedef struct _GrafoAloc{
 	Grafo *grafo_d;
 	Grafo *grafo_tmp;
 } GrafoAloc;
+
+// struct ativo_equal_true {
+// 	__device__ bool operator()(const Vertice &v) const {
+// 		return 
+// 	}
+// };
 
 typedef struct _Grafo {
 	Vertice *vertices;
@@ -286,67 +293,35 @@ typedef struct _Grafo {
 		ExcessType local_resCap;
 		int dist_tmp;
 		int dist_tmp2;
-		Aresta a;
+		Aresta *a;
 		Aresta a_tmp;
 		do {
-			excess_tmp = excess[v];
-			dist_tmp = numVertices;
-
 			for (int i = 0; i < tam_adj; i++) {
-				a_tmp = arestas[vertice->adjacentes[i]];
-				local_resCap = resCap[a_tmp.id];
+				Aresta *a = arestas + vertice->adjacentes[i];
+				ExcessType local_resCap = resCap[a->id];
+				excess_tmp = excess[v];
 				if (local_resCap > 0) {
-					dist_tmp2 = dist[a_tmp.to];
-					if (dist_tmp2 < dist_tmp) {
-						a = a_tmp;
-						dist_tmp = dist_tmp2;
-						resCap_tmp = local_resCap;
+					if (dist[v] > dist[a->to]) {
+						ExcessType delta = MIN(excess_tmp, local_resCap);
+						atomicAdd((unsigned long long *) &resCap[a->id], -delta);
+						atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
+						atomicAdd((unsigned long long *) &excess[a->to], delta);
+						atomicAdd((unsigned long long *) &excess[v], -delta);
+						if (excess[a->to] > 0) {
+							ENQUEUE_DEVICE(a->to);
+						}
 					}
 				}
+				if (excess[v] == 0){ break;}
 			}
-			if (dist[v] > dist_tmp) {
-				ExcessType delta = MIN(excess_tmp, resCap_tmp);
-				atomicAdd((unsigned long long *) &resCap[a.id], -delta);
-				atomicAdd((unsigned long long *) &resCap[a.reversa], delta);
-				atomicAdd((unsigned long long *) &excess[a.to], delta);
-				atomicAdd((unsigned long long *) &excess[v], -delta);
-				if (excess[a.to] > 0) {
-					ENQUEUE_DEVICE(a.to);
-				}
+
+			if (excess[v] > 0) {
+				if (dist[v] == numVertices) break;
+				RelabelDevice(v);
+				if (dist[v] == numVertices) break;
 			} else {
-				dist[v] = dist_tmp + 1;
+				break;
 			}
-
-			if (excess[v] <= 0 || dist[v] >= numVertices) break;
-
-			// for (int i = 0; i < tam_adj; i++) {
-			// 	if (i < tam_adj) {
-			// 		Aresta *a = arestas + vertice->adjacentes[i];
-			// 		ExcessType local_resCap = resCap[a->id];
-			// 		excess_tmp = excess[v];
-			// 		if (local_resCap > 0) {
-			// 			ExcessType delta = MIN(excess_tmp, local_resCap);
-			// 			if (dist[v] > dist[a->to]) {
-			// 				atomicAdd((unsigned long long *) &resCap[a->id], -delta);
-			// 				atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
-			// 				atomicAdd((unsigned long long *) &excess[a->to], delta);
-			// 				atomicAdd((unsigned long long *) &excess[v], -delta);
-			// 				if (excess[a->to] > 0) {
-			// 					ENQUEUE_DEVICE(a->to);
-			// 				}
-			// 			}
-			// 		}
-			// 		if (excess[v] == 0){ break;}
-			// 	}
-			// }
-
-			// if (excess[v] > 0) {
-			// 	if (dist[v] == numVertices) break;
-			// 	RelabelDevice(v);
-			// 	if (dist[v] == numVertices) break;
-			// } else {
-			// 	break;
-			// }
 		} while (1);
 	}
 
@@ -402,9 +377,7 @@ typedef struct _Grafo {
 		// Fila *bfsQ = new Fila;
 		bfsQ->reset();
 
-		for (int i = 0; i < numVertices; i++) {
-			dist[i] = numVertices;
-		}
+		thrust::fill(dist, dist + numVertices, numVertices);
 
 		bfsQ->enfileirar(numVertices - 1);
 		dist[numVertices - 1] = 0;
@@ -414,8 +387,20 @@ typedef struct _Grafo {
 			int v = bfsQ->desenfileirar();
 			int novaDistancia = dist[v] + 1;
 			Vertice *vertice = vertices + v;
-			for (int i = 0; i < vertice->numAdjacentes; i++) {
-				if (i < vertice->numAdjacentes) {
+
+			if (vertice->numAdjacentes < 10) {
+				BFS_UNROLL_STEP(9);
+				BFS_UNROLL_STEP(8);
+				BFS_UNROLL_STEP(7);
+				BFS_UNROLL_STEP(6);
+				BFS_UNROLL_STEP(5);
+				BFS_UNROLL_STEP(4);
+				BFS_UNROLL_STEP(3);
+				BFS_UNROLL_STEP(2);
+				BFS_UNROLL_STEP(1);
+				BFS_UNROLL_STEP(0);
+			} else {
+				for (int i = 0; i < vertice->numAdjacentes; i++) {
 					Aresta *adj = arestas + vertice->adjacentes[i];
 					if (resCap[adj->reversa] > 0) {
 						if (dist[adj->to] == numVertices && adj->from == v) {
@@ -531,9 +516,10 @@ typedef struct _Grafo {
 			*continuar = false;
 			tempo1 = second();
 			pushrelabel_kernel<<<blocks, threads_per_block>>>(this, fluxoTotal);
-			check_fim<<<blocks, threads_per_block>>>(this, continuar);
 			cudaDeviceSynchronize();
 			tempo2 += second() - tempo1;
+			// check_fim<<<blocks, threads_per_block>>>(this, continuar);
+			cudaDeviceSynchronize();
 			if (i % (50) == 0) {
 				tempo1 = second();
 				cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
