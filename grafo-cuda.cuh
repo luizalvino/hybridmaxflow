@@ -20,8 +20,8 @@
 #define BFS_UNROLL_STEP(i) { \
 	if (i < vertice->numAdjacentes) { \
 		Aresta *adj = arestas + vertice->adjacentes[i]; \
-		if (resCap[adj->reversa] > 0) { \
-			if (dist[adj->to] == numVertices && adj->from == v) { \
+		if (dist[adj->to] == numVertices) { \
+			if (resCap[adj->reversa] > 0 && adj->from == v) { \
 				dist[adj->to] = novaDistancia; \
 				bfsQ->enfileirar(adj->to); \
 			} \
@@ -286,33 +286,21 @@ typedef struct _Grafo {
 	}
 
 	__device__ void DischargeDevice(int v) {
-		int tam_adj = vertices[v].numAdjacentes;
-		Vertice *vertice = vertices + v;
-		ExcessType excess_tmp;
-		ExcessType resCap_tmp;
-		ExcessType local_resCap;
-		int dist_tmp;
-		int dist_tmp2;
-		Aresta *a;
-		Aresta a_tmp;
+		int tam_adj = vertices[v].numAdjacentes;		
 		do {
 			for (int i = 0; i < tam_adj; i++) {
-				Aresta *a = arestas + vertice->adjacentes[i];
-				ExcessType local_resCap = resCap[a->id];
-				excess_tmp = excess[v];
-				if (local_resCap > 0) {
-					if (dist[v] > dist[a->to]) {
-						ExcessType delta = MIN(excess_tmp, local_resCap);
-						atomicAdd((unsigned long long *) &resCap[a->id], -delta);
-						atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
-						atomicAdd((unsigned long long *) &excess[a->to], delta);
-						atomicAdd((unsigned long long *) &excess[v], -delta);
-						if (excess[a->to] > 0) {
-							ENQUEUE_DEVICE(a->to);
-						}
+				Aresta *a = arestas + vertices[v].adjacentes[i];				
+				if (dist[v] > dist[a->to] && resCap[a->id] > 0) {
+					ExcessType delta = MIN(excess[v], resCap[a->id]);
+					atomicAdd((unsigned long long *) &resCap[a->id], -delta);
+					atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
+					atomicAdd((unsigned long long *) &excess[a->to], delta);
+					atomicAdd((unsigned long long *) &excess[v], -delta);
+					if (excess[a->to] > 0) {
+						ENQUEUE_DEVICE(a->to);
 					}
 				}
-				if (excess[v] == 0){ break;}
+				if (excess[v] == 0){ return;}
 			}
 
 			if (excess[v] > 0) {
@@ -388,7 +376,7 @@ typedef struct _Grafo {
 			int novaDistancia = dist[v] + 1;
 			Vertice *vertice = vertices + v;
 
-			if (vertice->numAdjacentes < 10) {
+			if (vertice->numAdjacentes <= 10) {
 				BFS_UNROLL_STEP(9);
 				BFS_UNROLL_STEP(8);
 				BFS_UNROLL_STEP(7);
@@ -402,8 +390,8 @@ typedef struct _Grafo {
 			} else {
 				for (int i = 0; i < vertice->numAdjacentes; i++) {
 					Aresta *adj = arestas + vertice->adjacentes[i];
-					if (resCap[adj->reversa] > 0) {
-						if (dist[adj->to] == numVertices && adj->from == v) {
+					if (dist[adj->to] == numVertices && resCap[adj->reversa] > 0) {
+						if (adj->from == v) {
 							dist[adj->to] = novaDistancia;
 							bfsQ->enfileirar(adj->to);
 						}
@@ -515,11 +503,10 @@ typedef struct _Grafo {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			pushrelabel_kernel<<<blocks, threads_per_block>>>(this, fluxoTotal);
+			pushrelabel_kernel<<<blocks, threads_per_block, 0, stream1>>>(this, fluxoTotal);
+			check_fim<<<blocks, threads_per_block, 0, stream2>>>(this, continuar);
 			cudaDeviceSynchronize();
-			tempo2 += second() - tempo1;
-			// check_fim<<<blocks, threads_per_block>>>(this, continuar);
-			cudaDeviceSynchronize();
+			tempo2 += second() - tempo1;			
 			if (i % (50) == 0) {
 				tempo1 = second();
 				cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
@@ -565,12 +552,21 @@ __global__ void pushrelabel_kernel(Grafo *grafo, ExcessType *fluxoMaximo) {
 }
 
 __global__ void check_fim(Grafo *grafo, bool *continuar) {
-	int rank = getRank();
+	int rank = getRank() * 3;
 	while (rank < grafo->numVertices -1 ) {
-		if (grafo->ativo[rank]) {
-			// printf("%d ativo [excess:%llu]\n", rank, grafo->excess[rank]);
+		
+		if (rank < grafo->numVertices - 1 && grafo->ativo[rank]) {
 			*continuar = true;
 		}
+
+		if (rank + 1 < grafo->numVertices - 1 && grafo->ativo[rank+1]) {
+			*continuar = true;
+		}
+
+		if (rank + 2 < grafo->numVertices - 1 && grafo->ativo[rank+2]) {
+			*continuar = true;
+		}		
+
 		rank += blockDim.x * gridDim.x;
 	}
 }
