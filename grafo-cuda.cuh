@@ -10,8 +10,8 @@
 #define MIN(x, y) x < y ? x : y
 #define MAX(x, y) x > y ? x : y
 #define ENQUEUE(v) { \
-	ativo[v] = true; \
-	filaAtivos->enfileirar(v); \
+		ativo[v] = true; \
+		filaAtivos->enfileirar(v); \
 }
 #define ENQUEUE_DEVICE(v) { \
 	if (excess[v] > 0) { \
@@ -53,7 +53,7 @@
 		ExcessType local_resCap = resCap[a->id]; \
 		if (local_resCap > 0) { \
 			ExcessType delta = MIN(excess[v], local_resCap); \
-			if (dist[v] - 1 == dist[a->to]) { \
+			if (jD == dist[a->to]) { \
 				atomicAdd((unsigned long long *) &resCap[a->id], -delta); \
 				atomicAdd((unsigned long long *) &resCap[a->reversa], delta); \
 				atomicAdd((unsigned long long *) &excess[a->to], delta); \
@@ -219,18 +219,34 @@ typedef struct _Grafo {
 	}
 
 	__host__ void Discharge(int v, Fila *filaAtivos) {
+		int tam_adj = vertices[v].numAdjacentes;
 		do {
-			for (int i = 0; excess[v] > 0 && i < vertices[v].numAdjacentes; i++) {
+			int i;
+			for (i = 0; excess[v] > 0 && i < tam_adj; i++) {
 				Push(&ADJACENTE(v, i), filaAtivos);
 				if (excess[v] == 0) break;
 			}
-			if (excess[v] > 0) {
-				if (dist[v] == numVertices) break;
-				Relabel(v, filaAtivos);
-				// if (count[dist[v]] == 1) {
-				//  	Gap(dist[v]);
-				// }
-				if (dist[v] == numVertices) break;
+			if (i >= tam_adj) {
+				if (dist[v] == numVertices){break;}
+				int minD = numVertices;
+
+				for (i = 0; i < tam_adj; i++) {
+					if (i < tam_adj) {
+						Aresta *adj = arestas + vertices[v].adjacentes[i];
+						if (resCap[adj->id] > 0 && adj->from == v) {
+							int d_tmp = dist[adj->to];
+							d_tmp++;
+							if (d_tmp < minD) {
+								minD = d_tmp;
+							}
+						}
+					}
+				}
+
+				dist[v] = minD;
+				ENQUEUE(v);
+
+				if (dist[v] == numVertices){break;}
 			} else {
 				break;
 			}
@@ -258,7 +274,7 @@ typedef struct _Grafo {
 
 		for (int i = 0; i < tam_adj; i++) {
 			Aresta *adj = &ADJACENTE(v, i);
-			if (resCap[adj->id] > 0 && adj->from == v) {
+			if (resCap[adj->id] != 0) {
 				int d = dist[adj->to];
 				d++;
 				if (d < minD) {
@@ -274,8 +290,10 @@ typedef struct _Grafo {
 
 	__device__ void DischargeDevice(int v) {
 		int tam_adj = vertices[v].numAdjacentes;
-		int i;
+		int i, jD;
 		do {
+			jD = dist[v] - 1;
+
 			for (i = 0; i < tam_adj; i += 10) {
 				DISCHARGE_DEVICE_UNROLL_STEP(9 + i);
 				DISCHARGE_DEVICE_UNROLL_STEP(8 + i);
@@ -288,21 +306,23 @@ typedef struct _Grafo {
 				DISCHARGE_DEVICE_UNROLL_STEP(1 + i);
 				DISCHARGE_DEVICE_UNROLL_STEP(0 + i);
 			}
-
+			
 			if (i >= tam_adj) {
 				if (dist[v] == numVertices){break;}
 				int minD = numVertices;
 
-				for (i = 0; i < tam_adj; i++) {
+				for (i = 0; i < tam_adj; i += 10) {
 					if (i < tam_adj) {
-						Aresta *adj = arestas + vertices[v].adjacentes[i];
-						if (resCap[adj->id] > 0 && adj->from == v) {
-							int d_tmp = dist[adj->to];
-							d_tmp++;
-							if (d_tmp < minD) {
-								minD = d_tmp;
-							}
-						}
+						RELABEL_DEVICE_UNROLL_STEP(9);
+						RELABEL_DEVICE_UNROLL_STEP(8);
+						RELABEL_DEVICE_UNROLL_STEP(7);
+						RELABEL_DEVICE_UNROLL_STEP(6);
+						RELABEL_DEVICE_UNROLL_STEP(5);
+						RELABEL_DEVICE_UNROLL_STEP(4);
+						RELABEL_DEVICE_UNROLL_STEP(3);
+						RELABEL_DEVICE_UNROLL_STEP(2);
+						RELABEL_DEVICE_UNROLL_STEP(1);
+						RELABEL_DEVICE_UNROLL_STEP(0);
 					}
 				}
 
@@ -310,6 +330,7 @@ typedef struct _Grafo {
 				ENQUEUE_DEVICE(v);
 
 				if (dist[v] == numVertices){break;}
+				// printf("rank = %d | clock = %d\n", v, (int) clock() - (int) c1);
 			} else {
 				break;
 			}
@@ -360,9 +381,9 @@ typedef struct _Grafo {
 	}
 
 	__host__ int bfs(Fila *bfsQ) {
-		// double timeTotal = 0;
+		double timeTotal = 0;
 		// printf("global update!\n");
-		double time1 = second();
+		// double time1 = second();
 		// Fila *bfsQ = new Fila;
 		bfsQ->reset();
 		int aSize = 0;
@@ -410,9 +431,10 @@ typedef struct _Grafo {
 			}
 		}
 
-		if (*excessTotal > 0) {
+		if (*excessTotal > 0 && numVisitados < numVertices - 2) {
 			for (int i = 1; i < numVertices - 1; i++) {
 				if (dist[i] == numVertices && !marcado[i]) {
+					// printf("ativo[%d] = %d\n", i, ativo[i]);
 					numMarcados++;
 					marcado[i] = true;
 					(*excessTotal) -= excess[i];
@@ -421,9 +443,8 @@ typedef struct _Grafo {
 		}
 
 		dist[0] = numVertices;
-		// printf("bfs timeTotal = %f\n", second() - time1);
 
-		printf("numVisitados = %d | aSize = %d | marcados = %d | chegouFonte = %d | e[0] = %llu | e[n-1] = %llu | excessTotal = %llu\n", numVisitados, aSize, numMarcados, chegouFonte, excess[0], excess[numVertices - 1], *excessTotal);
+		// printf("numVisitados = %d | aSize = %d | marcados = %d | chegouFonte = %d | e[0] = %llu | e[n-1] = %llu | excessTotal = %llu\n", numVisitados, aSize, numMarcados, chegouFonte, excess[0], excess[numVertices - 1], *excessTotal);
 
 		return (numMarcados == 0 && chegouFonte == 0) || aSize == 0;
 	}
@@ -445,23 +466,26 @@ typedef struct _Grafo {
 			Push(&ADJACENTE(0, i), filaAtivos);
 		}	
 
-		// int contador = 0;
-		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < numVertices / 10) {
-		// 	int v = filaAtivos->desenfileirar();
-		// 	ativo[v] = false;
-		// 	Discharge(v, filaAtivos);
-		// 	if (contador++ >= nm * 0.4) {
-		// 		bfs();
-		// 		contador = 0;
-		// 	}
-		// }
+		int contador = 0;
+		while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 500) {
+			int v = filaAtivos->desenfileirar();
+			if (v == numVertices - 1) continue;
+			ativo[v] = false;
+			Discharge(v, filaAtivos);
+			if (contador++ >= numVertices * 2) {
+				// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
+				bfs(&filaBfs);
+				if (achouFluxoMaximo()) break;
+				contador = 0;
+			}
+		}
 		printf("tempo maxFlowInit = %f\n", second() - tempo1);
 		printf("filaAtivos = %d\n", filaAtivos->tamanho);
 	}
 
 	_GrafoAloc alocaGrafoDevice() {
-		cudaStream_t cs[100];
-		for (int i = 0; i < 100; i++) {
+		cudaStream_t cs[10];
+		for (int i = 0; i < 10; i++) {
 			cudaStreamCreate(cs + i);
 		}
 		double tempo1 = second();
@@ -496,6 +520,7 @@ typedef struct _Grafo {
 			printf("CUDA error na alocação: %s\n", cudaGetErrorString(error));
 			exit(-1);
 		}
+		cudaDeviceSynchronize();
 		printf("Tempo alocação = %f\n", second() - tempo1);
 		GrafoAloc grafo_aloc;
 		grafo_aloc.grafo_d = grafo_d;
@@ -509,20 +534,19 @@ typedef struct _Grafo {
 		ExcessType *fluxoTotal;
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0;
 		unsigned long long i = 0;
-		int stop = grafo_h->numVertices * 2;
 		dim3 threads_per_block = 256;
-		dim3 blocks = 256;
-		cudaStream_t stream1, stream2;
-
-		cudaStreamCreate(&stream1);
-		cudaStreamCreate(&stream2);
+		dim3 blocks = 64	;
+		
+		double tp1 = second();
 		cudaHostAlloc((void **)&fluxoTotal, sizeof(ExcessType), cudaHostAllocMapped);
 		cudaHostAlloc((void **)&continuar, sizeof(bool), cudaHostAllocMapped);
 		*fluxoTotal = 0;
-
-		printf("stop = %d\n", stop);
+		
+		printf("tempo inicial = %f\n", second() - tp1);
 		cudaDeviceSynchronize();
-		thrust::device_ptr<bool> ativos_d = thrust::device_pointer_cast(grafo_tmp->ativo);
+		cudaStream_t stream1, stream2;
+		cudaStreamCreate(&stream1);
+		cudaStreamCreate(&stream2);
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
@@ -531,7 +555,7 @@ typedef struct _Grafo {
 			// check_fim<<<blocks, threads_per_block, 0, stream2>>>(this, continuar);
 			// cudaDeviceSynchronize();
 			tempo2 += second() - tempo1;
-			if (i % (500) == 0) {
+			if (i % (50) == 0) {
 				cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
 				cudaMemcpy(grafo_h->ativo, grafo_tmp->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
 				cudaMemcpy(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
@@ -539,6 +563,8 @@ typedef struct _Grafo {
 				grafo_h->bfs(&filaBfs);
 				tempo3 += second() - tempo1;
 				cudaMemcpy(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice);
+				// cudaMemcpy(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice);
+				// cudaMemcpy(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice);
 			}
 
 			if (grafo_h->achouFluxoMaximo()) break;
@@ -582,6 +608,7 @@ __global__ void pushrelabel_kernel(Grafo *grafo) {
 	while (cycles > 0) {
 		while (rank < tamanho - 1 ) {
 			if (grafo->ativo[rank]) {
+			// if (true) {
 				grafo->ativo[rank] = false;
 				grafo->DischargeDevice(rank);
 			}

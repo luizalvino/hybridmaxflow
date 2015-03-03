@@ -3,7 +3,7 @@
 #THRUST_INC = -I/home/alvino/Dropbox/private/mestrado/orientacao/2014/mpi+cuda/hibrid_cuda/include
 
 CFLAGS = -O4 -pg
-#CFLAGS = -pg
+# CFLAGS = -pg
 
 
 compile:
