@@ -17,12 +17,7 @@ int main(int argc, char *argv[]) {
 	Grafo *grafo = Grafo::ImportarDoArquivo(argv[1], rank, nprocs);
 		
 	printf("Rank:%d | idInicial:%d - idFinal:%d | - Inicialização completa!\n", rank, grafo->idInicial, grafo->idFinal);
-
- //    if (rank == 0) {
- //    	ExcessType fluxo;
-	// 	MPI_Recv(&fluxo, 1, MPI_UNSIGNED_LONG_LONG, 1, 0, MPI_COMM_WORLD, &stat);
-	// 	printf("Fluxo máximo = %lld\n", fluxo);
-	// } else {
+ 
 	double tempo1 = second();
 	grafo->maxFlowInit();
 	printf("proc %d | maxFlowInit tempo = %f\n", rank, second() - tempo1);

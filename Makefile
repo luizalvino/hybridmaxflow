@@ -13,4 +13,4 @@ run:
 	mpirun -v -np 9 -machinefile mpi-nodes ./run-pushrelabel-mpi-cuda
 
 sync:
-	rsync -av ./ luiz_alvino@cluster.ctei.ufms.br:mpi+cuda/hibrid_cuda/
+	rsync -av ./ luiz_alvino@172.16.27.88:mpi+cuda/hibrid_cuda/

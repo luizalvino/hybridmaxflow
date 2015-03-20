@@ -167,6 +167,8 @@ typedef struct _Grafo {
 	int idFinal;
 	int idNum;
 	int vertices_por_processo;
+	int numVizinhosAnt;
+	int numVizinhosProx;
 	Mensagem *mensagens;
 
 	void init(int _numVertices, int _numArestas, int rank, int nprocs) {
@@ -193,10 +195,12 @@ typedef struct _Grafo {
 		excessTotal = new ExcessType;
 		*excessTotal = 0;
 
-		vertices_por_processo = ceil(numVertices / nprocs);
+		vertices_por_processo = ceil(numVertices / nprocs) + 1;
 		idInicial = (vertices_por_processo) * rank;
 		idFinal = (idInicial + vertices_por_processo) < numVertices ? idInicial + vertices_por_processo - 1 : numVertices - 1;
 		idNum = rank;
+		numVizinhosAnt = 0;
+		numVizinhosProx = 0;
 	}
 
 	static struct _Grafo* ImportarDoArquivo(char *arquivo, int rank, int nprocs) {
@@ -230,6 +234,7 @@ typedef struct _Grafo {
 				novoGrafo->AdicionarAresta(a, b, c);
 			}
 		}
+		printf("rank %d | numVizinhosAnt %d | numVizinhosProx %d\n", rank, novoGrafo->numVizinhosAnt, novoGrafo->numVizinhosProx);
 		return novoGrafo;
 	}
 
@@ -242,6 +247,12 @@ typedef struct _Grafo {
 		arestas[numArestas].init(to, from, numArestas, vertices[from].numAdjacentes - 1, numArestas - 1, (from >= idInicial || from <= idFinal));
 		vertices[to].AdicionarAdjacente(numArestas);
 		numArestas++;
+
+		if (to < idInicial && from >= idInicial && from <= idFinal) {
+			numVizinhosAnt++;
+		} else if (to > idFinal && from >= idInicial && from <= idFinal) {
+			numVizinhosProx++;
+		}
 }
 
 	__device__ __host__ void ImprimirArestas() {
@@ -567,7 +578,7 @@ typedef struct _Grafo {
 		bool *continuar;
 		Fila filaBfs;
 		ExcessType *fluxoTotal;
-		double tempo1 = 0, tempo2 = 0, tempo3 = 0;
+		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0;
 		unsigned long long i = 0;
 		dim3 threads_per_block = 256;
 		dim3 blocks = 64;
@@ -582,8 +593,7 @@ typedef struct _Grafo {
 		cudaStream_t stream1, stream2;
 		cudaStreamCreate(&stream1);
 		cudaStreamCreate(&stream2);
-		std::vector< std::deque<Mensagem> > msgVector(nproc, std::deque<Mensagem>());
-		std::deque<Mensagem> msgRec;
+		std::vector< std::deque<Mensagem> > msgVector(nproc, std::deque<Mensagem>(max(grafo_h->numVizinhosProx, grafo_h->numVizinhosAnt)));
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
@@ -593,11 +603,11 @@ typedef struct _Grafo {
 			cudaDeviceSynchronize();
 			tempo2 += second() - tempo1;
 
-			if (i % (50) == 0) {
+			if (i % (100) == 0) {
+				tempo1 = second();
 				cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
 				cudaMemcpy(grafo_h->ativo, grafo_tmp->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
 				cudaMemcpy(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
-				cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
 
 				// for (int j = 0; j < grafo_h->numVertices; j++) {
 				// 	if (grafo_h->excess[j] > 0 && j >= grafo_h->idInicial && j <= grafo_h->idFinal) {
@@ -608,76 +618,57 @@ typedef struct _Grafo {
 				// int ativos = std::count(grafo_h->ativo + 1, grafo_h->ativo + grafo_h->numVertices - 1, true);
 				// printf("%d ativos %d\n", rank, ativos);
 
-				/*
-					A ideia aqui é copiar as mensagem da gpu e enviar para os processos corretos,
-					depois recebe as mensagens, processa e parte para o próximo loop.
-				*/
-				cudaMemcpy(grafo_h->mensagens, grafo_tmp->mensagens, sizeof(Mensagem) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
-				for (Mensagem *msg = grafo_h->mensagens; msg != grafo_h->mensagens + grafo_h->numArestas; msg++) {
-					if (msg->idAresta >= 0) {
-						// printf("mpirank %d | empurrando %llu | arestaId %d\n", rank, msg->delta, msg->idAresta);
-						Aresta *a = grafo_h->arestas + msg->idAresta;
-						int rankDestino = a->to < grafo_h->idInicial ? rank - 1 : rank + 1;
-						msgVector[rankDestino].push_back(*msg);
-						msg->delta = 0;
-						msg->idAresta = -1;
-					}
-				}
-				for (int j = 0; j < nproc; j++) {
-					if (j == rank - 1 || j == rank + 1) {
-						long tam = msgVector[j].size();
-						long tam_rec;
-						MPI_Sendrecv(&tam, 1, MPI_UNSIGNED_LONG, j, 0, &tam_rec, 1, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						
-						int idArestas[tam];
-						ExcessType deltas[tam];
-						int idArestasRec[tam_rec];
-						ExcessType deltasRec[tam_rec];
-						for (int l = 0; l < tam; l++) {
-							idArestas[l] = msgVector[j][l].idAresta;
-							deltas[l] = msgVector[j][l].delta;
-						}
-						msgVector[j].clear();
+				if (nproc > 1) {
+					/*
+						A ideia aqui é copiar as mensagem da gpu e enviar para os processos corretos,
+						depois recebe as mensagens, processa e parte para o próximo loop.
+					*/
+					cudaMemcpy(grafo_h->mensagens, grafo_tmp->mensagens, sizeof(Mensagem) * grafo_h->numArestas, cudaMemcpyDeviceToHost);
+					int msgIdx[nproc];
+					memset(msgIdx, 0, sizeof(msgIdx));
+					for (Mensagem *msg = grafo_h->mensagens; msg != grafo_h->mensagens + grafo_h->numArestas; msg++) {
+						if (msg->idAresta >= 0) {
+							// printf("mpirank %d | empurrando %llu | arestaId %d\n", rank, msg->delta, msg->idAresta);
+							Aresta *a = grafo_h->arestas + msg->idAresta;
+							int rankDestino = a->to < grafo_h->idInicial ? rank - 1 : rank + 1;
+							msgVector[rankDestino][msgIdx[rankDestino]++] = *msg;
 
-						MPI_Sendrecv(idArestas, tam, MPI_INT, j, 0, idArestasRec, tam_rec, MPI_INT, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						MPI_Sendrecv(deltas, tam, MPI_UNSIGNED_LONG_LONG, j, 0, deltasRec, tam_rec, MPI_UNSIGNED_LONG_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-						for (int l = 0; l < tam_rec; l++) {
-							Aresta *a = grafo_h->arestas + idArestasRec[l];
-							ExcessType delta = deltasRec[l];
-							grafo_h->resCap[a->id] -= delta;
-							grafo_h->resCap[a->reversa] += delta;
-							grafo_h->excess[a->to] += delta;
-							grafo_h->excess[a->from] -= delta;
-							grafo_h->ativo[a->to] = true;
+							msg->delta = 0;
+							msg->idAresta = -1;
 						}
 					}
+					for (int j = 0; j < nproc; j++) {
+						if ((rank > 0 && j == rank - 1) || (rank < nproc - 1 && j == rank + 1)) {
+							long tam = msgIdx[j];
+							if (tam > 0) printf("rank:%d | destino %d | tam %ld\n", rank, j, tam);
+							long tam_rec;
+							MPI_Sendrecv(&tam, 1, MPI_UNSIGNED_LONG, j, 0, &tam_rec, 1, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+							int idArestas[tam];
+							ExcessType deltas[tam];
+							int idArestasRec[tam_rec];
+							ExcessType deltasRec[tam_rec];
+							for (int l = 0; l < tam; l++) {
+								idArestas[l] = msgVector[j][l].idAresta;
+								deltas[l] = msgVector[j][l].delta;
+							}
+							// msgVector[j].clear();
+
+							MPI_Sendrecv(idArestas, tam, MPI_INT, j, 0, idArestasRec, tam_rec, MPI_INT, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+							MPI_Sendrecv(deltas, tam, MPI_UNSIGNED_LONG_LONG, j, 0, deltasRec, tam_rec, MPI_UNSIGNED_LONG_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+							for (int l = 0; l < tam_rec; l++) {
+								Aresta *a = grafo_h->arestas + idArestasRec[l];
+								ExcessType delta = deltasRec[l];
+								grafo_h->resCap[a->id] -= delta;
+								grafo_h->resCap[a->reversa] += delta;
+								grafo_h->excess[a->to] += delta;
+								grafo_h->excess[a->from] -= delta;
+								grafo_h->ativo[a->to] = true;
+							}
+						}
+					}
 				}
-
-				/*
-					Enviar as distâncias também
-					O ideal aqui seria enviar apenas as distâncias dos vértices de fronteira
-				*/
-				// for (int j = 0; j < nproc; j++) {
-				// 	if (j != rank) {
-				// 		int *dist_send = grafo_h->dist + grafo_h->idInicial;
-				// 		long tam = grafo_h->idFinal - grafo_h->idInicial + 1;
-				// 		long tam_rec;
-				// 		MPI_Sendrecv(&tam, 1, MPI_LONG, j, 0, &tam_rec, 1, MPI_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-				// 		int dist_rec[tam_rec];
-				// 		MPI_Sendrecv(dist_send, tam, MPI_INT, j, 0, dist_rec, tam_rec, MPI_INT, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-				// 		for (int k = 0; k < tam_rec; k++) {
-				// 			int v = (grafo_h->vertices_por_processo * j) + k;
-				// 			if (grafo_h->dist[v] != dist_rec[k]) {
-				// 				// printf("rank %d | v %d | dist mudou de %d para %d \n", rank, v, grafo_h->dist[v], dist_rec[k]);
-				// 				grafo_h->dist[v] = dist_rec[k];
-				// 			}
-				// 		}
-						
-				// 	}
-				// }
 
 				/*
 					Enviar a capacidade residual para o processo 0 para executar a rotulação global
@@ -701,37 +692,41 @@ typedef struct _Grafo {
 						}
 					}
 					tempo1 = second();
+					cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost);
 					grafo_h->bfs(&filaBfs);
 					tempo3 += second() - tempo1;
 					for (int j = 0; j < nproc - 1; j++) {
 						MPI_Send(grafo_h->dist, grafo_h->numVertices, MPI_INT, j, 0, MPI_COMM_WORLD);
 					}
 				}
+				tempo4 += second() - tempo1;
+
+				/*
+					Se achou o fluxo máximo, encerra e notifica os outros processos
+				*/
+				bool sair;
+				if (rank == nproc - 1) {
+					sair = grafo_h->achouFluxoMaximo();
+					for (int j = 0; j < nproc - 1; j++) {
+						MPI_Send(&sair, 1, MPI_CHAR, j, 0, MPI_COMM_WORLD);
+					}
+				} else {
+					MPI_Recv(&sair, 1, MPI_CHAR, nproc - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+					if (sair) {
+						MPI_Finalize();
+						exit(0);
+					}
+				}
+				if (sair) break;
 
 				cudaMemcpy(grafo_tmp->mensagens, grafo_h->mensagens, sizeof(Mensagem) * grafo_h->numArestas, cudaMemcpyHostToDevice);
-								
+
 				cudaMemcpy(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice);
 				cudaMemcpy(grafo_tmp->resCap, grafo_h->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyHostToDevice);
 				cudaMemcpy(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice);
 				cudaMemcpy(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice);
 			}
 
-			bool sair;
-			if (rank == nproc - 1) {
-				sair = grafo_h->achouFluxoMaximo();
-				for (int j = 0; j < nproc - 1; j++) {
-					MPI_Send(&sair, 1, MPI_CHAR, j, 0, MPI_COMM_WORLD);
-				}				
-			} else {
-				MPI_Recv(&sair, 1, MPI_CHAR, nproc - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-				if (sair) {
-					MPI_Finalize();
-					exit(0);
-				}
-			}
-
-			if (sair) break;
-			
 			i++;
 		} while (1);
 		// check_flow<<<1, 1>>>(this, fluxoTotal);
@@ -739,6 +734,7 @@ typedef struct _Grafo {
 		cudaThreadSynchronize();
 		printf("tempo pushrelabel_kernel: %f  i:%llu\n", tempo2, i);
 		printf("tempo bfs: %f\n", tempo3);
+		printf("tempo msgs: %f\n", tempo4);
 		printf("excessTotal %llu\n", grafo_h->excess[grafo_h->numVertices - 1]);
 		// check for error
 		cudaError_t error = cudaGetLastError();
