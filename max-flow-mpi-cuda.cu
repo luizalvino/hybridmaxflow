@@ -13,11 +13,11 @@ int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-    
+
 	Grafo *grafo = Grafo::ImportarDoArquivo(argv[1], rank, nprocs);
-		
+
 	printf("Rank:%d | idInicial:%d - idFinal:%d | - Inicialização completa!\n", rank, grafo->idInicial, grafo->idFinal);
- 
+
 	double tempo1 = second();
 	grafo->maxFlowInit();
 	printf("proc %d | maxFlowInit tempo = %f\n", rank, second() - tempo1);
