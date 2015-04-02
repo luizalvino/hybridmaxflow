@@ -720,25 +720,18 @@ typedef struct _Grafo {
 						MPI_Pack(grafo_h->resCap, grafo_h->numArestas, MPI_UNSIGNED_LONG, buffSend, buffSendSize, &position, MPI_COMM_WORLD);
 						MPI_Pack(grafo_h->excess + grafo_h->idInicial, grafo_h->vertices_por_processo, MPI_UNSIGNED_LONG, buffSend, buffSendSize, &position, MPI_COMM_WORLD);
 						MPI_Gather(buffSend, buffSendSize, MPI_PACKED, NULL, buffSendSize, MPI_PACKED, nproc - 1, MPI_COMM_WORLD);
-						// MPI_Send(buffSend, buffSendSize, MPI_PACKED, nproc - 1, 0, MPI_COMM_WORLD);
-						// printf("rank %d | terminou gather\n", rank);
-
-						// MPI_Send(grafo_h->resCap, grafo_h->numArestas, MPI_UNSIGNED_LONG, nproc - 1, 0, MPI_COMM_WORLD);
-						// MPI_Send(grafo_h->excess + grafo_h->idInicial, grafo_h->idFinal - grafo_h->idInicial + 1, MPI_UNSIGNED_LONG, nproc - 1, 0, MPI_COMM_WORLD);
-						MPI_Recv(grafo_h->dist, grafo_h->numVertices, MPI_INT, nproc - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+						MPI_Request request;
+						MPI_Irecv(grafo_h->dist, grafo_h->numVertices, MPI_INT, nproc - 1, 0, MPI_COMM_WORLD, &request);
 					} else {
 						int buffSendSize = grafo_h->numArestas * sizeof(CapType) + grafo_h->vertices_por_processo * sizeof(CapType);
 						char buffSend[buffSendSize];
-						double tempoSend = second();
 						int position = 0;
 						int buffRecvSize = grafo_h->numArestas * sizeof(CapType) + grafo_h->vertices_por_processo * sizeof(CapType);
 						int buffRecvSizeTotal = buffRecvSize * (nproc - 1);
 						char buffRecv[buffRecvSizeTotal];
+						double tempoSend = second();
 						MPI_Gather(buffSend, buffSendSize, MPI_PACKED, buffRecv, buffRecvSize, MPI_PACKED, nproc - 1, MPI_COMM_WORLD);
-						// printf("rank %d | terminou gather\n", rank);
-						// for (int j = 0; j < nproc - 1; j++) {
-						// 	MPI_Recv(buffRecv + buffRecvSize * j, buffRecvSize, MPI_PACKED, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						// }
+						tempoTotal += second() - tempoSend;
 
 						for (int j = 0; j < nproc - 1; j++) {
 							int idInicial_tmp = (grafo_h->vertices_por_processo) * j;
@@ -746,36 +739,31 @@ typedef struct _Grafo {
 						 	CapType *resCap_tmp = new CapType[grafo_h->numArestas];
 							MPI_Unpack(buffRecv, buffRecvSizeTotal, &position, resCap_tmp, grafo_h->numArestas, MPI_UNSIGNED_LONG, MPI_COMM_WORLD);
 							MPI_Unpack(buffRecv, buffRecvSizeTotal, &position, grafo_h->excess + idInicial_tmp, grafo_h->vertices_por_processo, MPI_UNSIGNED_LONG, MPI_COMM_WORLD);
+							tempoSend = second();
+							/*
+								o tempo está meio ruim neste trecho
+								é bom tentar otimizar
+							*/
 							for (int k = 0; k < grafo_h->numArestas; k++) {
 								Aresta *a = grafo_h->arestas + k;
 								if (a->from >= idInicial_tmp && a->from <= idFinal_tmp) {
 									grafo_h->resCap[k] = resCap_tmp[k];
 								}
 							}
+							tempoTotal += second() - tempoSend;
 							delete(resCap_tmp);
 						}
-						// 	CapType *resCap_tmp = new CapType[grafo_h->numArestas];
-						// 	MPI_Recv(resCap_tmp, grafo_h->numArestas, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						// 	int idInicial_tmp = (grafo_h->vertices_por_processo) * j;
-						// 	int idFinal_tmp = (idInicial_tmp + grafo_h->vertices_por_processo) < grafo_h->numVertices ? idInicial_tmp + grafo_h->vertices_por_processo - 1 : grafo_h->numVertices - 1;
-						// 	MPI_Recv(grafo_h->excess + idInicial_tmp, idFinal_tmp - idInicial_tmp + 1, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-						// 	for (int k = 0; k < grafo_h->numArestas; k++) {
-						// 		Aresta *a = grafo_h->arestas + k;
-						// 		if (a->from >= idInicial_tmp && a->from <= idFinal_tmp) {
-						// 			grafo_h->resCap[k] = resCap_tmp[k];
-						// 		}
-						// 	}
-						// 	delete(resCap_tmp);
-						// }
-						tempo1 = second();
+
 						if (grafo_h->excess[grafo_h->numVertices - 1] > 0) {
+							tempo1 = second();
 							gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
 							grafo_h->bfs(&filaBfs);
-							tempoTotal -= second() - tempo1;
 							tempo3 += second() - tempo1;
 						}
+						tempoSend = second();
 						for (int j = 0; j < nproc - 1; j++) {
-							MPI_Send(grafo_h->dist, grafo_h->numVertices, MPI_INT, j, 0, MPI_COMM_WORLD);
+							MPI_Request request;
+							MPI_Isend(grafo_h->dist, grafo_h->numVertices, MPI_INT, j, 0, MPI_COMM_WORLD, &request);
 						}
 						tempoTotal += second() - tempoSend;
 					}
@@ -793,36 +781,24 @@ typedef struct _Grafo {
 				/*
 					Se achou o fluxo máximo, encerra e notifica os outros processos
 				*/
-				// bool sair;
-				// if (rank == nproc - 1) {
-				// 	sair = grafo_h->achouFluxoMaximo();
-				// 	for (int j = 0; j < nproc - 1; j++) {
-				// 		MPI_Request request;
-				// 		MPI_Isend(&sair, 1, MPI_CHAR, j, 0, MPI_COMM_WORLD, &request);
-				// 	}
-				// } else {
-				// 	MPI_Request request;
-				// 	MPI_Status status;
-				// 	MPI_Irecv(&sair, 1, MPI_CHAR, nproc - 1, 0, MPI_COMM_WORLD, &request);
-				// 	MPI_Wait(&request, &status);
-				// 	if (sair) {
-				// 		MPI_Finalize();
-				// 		exit(0);
-				// 	}
-				// }
-				// if (sair) {
-				// 	break;
-				// }
 				bool sair;
 				if (rank == nproc - 1) {
 					sair = grafo_h->achouFluxoMaximo();
-				}
-				MPI_Bcast(&sair, 1, MPI_CHAR, nproc - 1, MPI_COMM_WORLD);
-				if (sair) {
-					if (rank != nproc - 1) {
+					for (int j = 0; j < nproc - 1; j++) {
+						MPI_Request request;
+						MPI_Isend(&sair, 1, MPI_CHAR, j, 0, MPI_COMM_WORLD, &request);
+					}
+				} else {
+					MPI_Request request;
+					MPI_Status status;
+					MPI_Irecv(&sair, 1, MPI_CHAR, nproc - 1, 0, MPI_COMM_WORLD, &request);
+					MPI_Wait(&request, &status);
+					if (sair) {
 						MPI_Finalize();
 						exit(0);
 					}
+				}
+				if (sair) {
 					break;
 				}
 
