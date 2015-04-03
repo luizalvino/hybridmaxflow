@@ -184,6 +184,7 @@ typedef struct _Grafo {
 	Mensagem *mensagensAnt;
 	Mensagem *mensagensProx;
 	int *numPush;
+	int *arestasLocal;
 
 	void init(int _numVertices, int _numArestas, int rank, int nprocs) {
 		numVertices = _numVertices;
@@ -630,7 +631,7 @@ typedef struct _Grafo {
 			tempo2 += second() - tempo1;
 
 			tempoMsg = second();
-			if (i % (100) == 0) {
+			if (i % (50) == 0) {
 				cudaMemset(grafo_tmp->numPush, 0, sizeof(int) * grafo_h->numVertices);
 
 				tempoCopia = second();
@@ -675,6 +676,7 @@ typedef struct _Grafo {
 						}
 
 						double tempoSend = second();
+						double tempoSendTotal;
 						MPI_Sendrecv(&tam, 1, MPI_UNSIGNED_LONG, j, 0, &tam_rec, 1, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 						tempoTotal += second() - tempoSend;
 
@@ -693,13 +695,17 @@ typedef struct _Grafo {
 						int idArestasRec[tam_rec];
 						ExcessType deltasRec[tam_rec];
 						position = 0;
+
 						MPI_Unpack(buffRecv, buffRecvSize, &position, idArestasRec, tam_rec, MPI_INT, MPI_COMM_WORLD);
 						MPI_Unpack(buffRecv, buffRecvSize, &position, deltasRec, tam_rec, MPI_UNSIGNED_LONG_LONG, MPI_COMM_WORLD);
 
+
+						ExcessType totalEnviado = 0;
 						for (int l = 0; l < tam_rec; l++) {
 							ExcessType delta = deltasRec[l];
 							// printf("rank %d | delta %llu\n", rank, delta);
 							if (delta > 0) {
+								totalEnviado += delta;
 								Aresta *a = grafo_h->arestas + idArestasRec[l];
 								grafo_h->resCap[a->id] -= delta;
 								grafo_h->resCap[a->reversa] += delta;
@@ -708,6 +714,8 @@ typedef struct _Grafo {
 								grafo_h->ativo[a->to] = true;
 							}
 						}
+						tempoSendTotal = second() - tempoSend;
+						printf("Total enviado de %d para %d = %llu | tempoSend = %f\n", j, rank, totalEnviado, tempoSendTotal);
 					}
 					/*
 					Enviar a capacidade residual para o processo nproc-1 para executar a rotulação global
@@ -794,6 +802,7 @@ typedef struct _Grafo {
 					MPI_Irecv(&sair, 1, MPI_CHAR, nproc - 1, 0, MPI_COMM_WORLD, &request);
 					MPI_Wait(&request, &status);
 					if (sair) {
+						printf("rank %d | tempo pushrelabel_kernel %f\n", rank, tempo2);
 						MPI_Finalize();
 						exit(0);
 					}
