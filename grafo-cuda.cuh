@@ -69,7 +69,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 			ExcessType delta = MIN(excess[v], local_resCap); \
 			if (delta > 0) { \
 				if (jD >= dist[a->to]) { \
-					numPush[v]++; \
 					atomicAdd((unsigned long long *) &resCap[a->id], -delta); \
 					atomicAdd((unsigned long long *) &resCap[a->reversa], delta); \
 					atomicAdd((unsigned long long *) &excess[v], -delta); \
@@ -126,12 +125,14 @@ typedef struct _Aresta {
 
 typedef struct _Vertice {
 	int label;
+	bool fronteira;
 	int adjacentes[70];
 	int numAdjacentes;
 
 	void init(int _label) {
 		label = _label;
 		numAdjacentes = 0;
+		fronteira = false;
 	}
 
 	void AdicionarAdjacente(int index) {
@@ -183,8 +184,8 @@ typedef struct _Grafo {
 	int numVizinhosProx;
 	Mensagem *mensagensAnt;
 	Mensagem *mensagensProx;
-	int *numPush;
-	int *arestasLocal;
+	std::vector<int> fronteiraAnt;
+	std::vector<int> fronteiraProx;
 
 	void init(int _numVertices, int _numArestas, int rank, int nprocs) {
 		numVertices = _numVertices;
@@ -196,7 +197,6 @@ typedef struct _Grafo {
 		dist = new int[numVertices];
 		ativo = new bool[numVertices];
 		marcado = new bool[numVertices];
-		numPush = new int[numVertices];
 
 		int i;
 		for (i = 0; i < numVertices; i++) {
@@ -273,16 +273,24 @@ typedef struct _Grafo {
 		if (to < idInicial && from >= idInicial && from <= idFinal) {
 			arestas[numArestas - 2].msgId = numVizinhosAnt;
 			numVizinhosAnt++;
+			fronteiraAnt.push_back(from);
+			vertices[from].fronteira = true;
 		} else if (to > idFinal && from >= idInicial && from <= idFinal) {
 			arestas[numArestas - 2].msgId = numVizinhosProx;
 			numVizinhosProx++;
+			fronteiraProx.push_back(from);
+			vertices[from].fronteira = true;
 		}
-		if (from < idInicial && to >= idInicial && from <= idFinal) {
-			arestas[numArestas - 1].msgId = numVizinhosAnt;
+		if (to < idInicial && from >= idInicial && from <= idFinal) {
+			arestas[numArestas - 2].msgId = numVizinhosAnt;
 			numVizinhosAnt++;
-		} else if (from > idFinal && to >= idInicial && from <= idFinal) {
-			arestas[numArestas - 1].msgId = numVizinhosProx;
+			fronteiraAnt.push_back(from);
+			vertices[from].fronteira = true;
+		} else if (to > idFinal && from >= idInicial && from <= idFinal) {
+			arestas[numArestas - 2].msgId = numVizinhosProx;
 			numVizinhosProx++;
+			fronteiraProx.push_back(from);
+			vertices[from].fronteira = true;
 		}
 }
 
@@ -369,17 +377,44 @@ typedef struct _Grafo {
 		do {
 			jD = dist[v] - 1;
 
-			for (i = 0; i < tam_adj; i += 10) {
-				DISCHARGE_DEVICE_UNROLL_STEP(9 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(8 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(7 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(6 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(5 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(4 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(3 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(2 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(1 + i);
-				DISCHARGE_DEVICE_UNROLL_STEP(0 + i);
+			for (i = 0; i < tam_adj; i += 1) {
+				// DISCHARGE_DEVICE_UNROLL_STEP(9 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(8 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(7 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(6 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(5 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(4 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(3 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(2 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(1 + i);
+				// DISCHARGE_DEVICE_UNROLL_STEP(0 + i);
+				if (i < tam_adj) {
+					Aresta *a = arestas + vertices[v].adjacentes[i];
+					ExcessType local_resCap = resCap[a->id];
+					if (local_resCap > 0) {
+						ExcessType delta = MIN(excess[v], local_resCap);
+						if (delta > 0) {
+							if (jD >= dist[a->to]) {
+								atomicAdd((unsigned long long *) &resCap[a->id], -delta);
+								atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
+								atomicAdd((unsigned long long *) &excess[v], -delta);
+								if (a->to < idInicial) {
+									mensagensAnt[a->msgId].idAresta = a->id;
+									mensagensAnt[a->msgId].delta += delta;
+								} else if (a->to > idFinal) {
+									mensagensProx[a->msgId].idAresta = a->id;
+									mensagensProx[a->msgId].delta += delta;
+								} else {
+									atomicAdd((unsigned long long *) &excess[a->to], delta);
+								}
+								if (!ativo[a->to] && a->to != numVertices - 1) {
+									ENQUEUE_DEVICE(a->to);
+								}
+							}
+						}
+					}
+					if (excess[v] == 0){break;}
+				}
 			}
 
 			if (i >= tam_adj) {
@@ -540,19 +575,19 @@ typedef struct _Grafo {
 			Push(&ADJACENTE(0, i), filaAtivos);
 		}
 
-		int contador = 0;
-		while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 1000) {
-			int v = filaAtivos->desenfileirar();
-			if (v == numVertices - 1) continue;
-			ativo[v] = false;
-			Discharge(v, filaAtivos);
-			if (contador++ >= numVertices * 2) {
-				// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
-				bfs(&filaBfs);
-				if (achouFluxoMaximo()) break;
-				contador = 0;
-			}
-		}
+		// int contador = 0;
+		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 1000) {
+		// 	int v = filaAtivos->desenfileirar();
+		// 	if (v == numVertices - 1) continue;
+		// 	ativo[v] = false;
+		// 	Discharge(v, filaAtivos);
+		// 	if (contador++ >= numVertices * 2) {
+		// 		// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
+		// 		bfs(&filaBfs);
+		// 		if (achouFluxoMaximo()) break;
+		// 		contador = 0;
+		// 	}
+		// }
 		printf("tempo maxFlowInit = %f\n", second() - tempo1);
 		printf("filaAtivos = %d\n", filaAtivos->tamanho);
 	}
@@ -580,7 +615,6 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMalloc(&grafo_tmp->ativo, sizeof(int) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensAnt, sizeof(Mensagem) * numVizinhosAnt) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensProx, sizeof(Mensagem) * numVizinhosProx) );
-		gpuErrchk( cudaMalloc(&grafo_tmp->numPush, sizeof(int) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_d, sizeof(Grafo)) );
 
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->vertices, vertices_tmp, sizeof(Vertice) * numVertices, cudaMemcpyHostToDevice, cs[2]) );
@@ -632,11 +666,11 @@ typedef struct _Grafo {
 
 			tempoMsg = second();
 			if (i % (50) == 0) {
-				cudaMemset(grafo_tmp->numPush, 0, sizeof(int) * grafo_h->numVertices);
 
 				tempoCopia = second();
 				gpuErrchk( cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost) );
 				gpuErrchk( cudaMemcpy(grafo_h->ativo, grafo_tmp->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
+				gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
 				gpuErrchk( cudaMemcpy(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
 				tempoTotal += second() - tempoCopia;
 

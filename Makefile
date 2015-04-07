@@ -2,7 +2,7 @@
 #VT_MPI_LIB = "/usr/lib/openmpi/lib/"
 #THRUST_INC = -I/home/alvino/Dropbox/private/mestrado/orientacao/2014/mpi+cuda/hibrid_cuda/include
 
-CFLAGS = -O4 -pg
+CFLAGS = -g -G
 #CFLAGS = -pg
 
 
