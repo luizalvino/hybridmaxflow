@@ -646,6 +646,8 @@ typedef struct _Grafo {
 		dim3 threads_per_block = 256;
 		dim3 blocks = (grafo_h->vertices_por_processo / 256) + 1;
 
+		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+
 		double tp1 = second();
 		gpuErrchk( cudaHostAlloc((void **)&fluxoTotal, sizeof(ExcessType), cudaHostAllocMapped) );
 		gpuErrchk( cudaHostAlloc((void **)&continuar, sizeof(bool), cudaHostAllocMapped) );
@@ -904,7 +906,7 @@ typedef struct _Grafo {
 
 } Grafo;
 
-__global__ void pushrelabel_kernel(Grafo *grafo, int mpirank, int nproc) {
+__global__ void pushrelabel_kernel(Grafo *grafo, const int mpirank, const int nproc) {
 	int rank = getRank() + grafo->idInicial;
 	int tamanho = grafo->idFinal;
 
