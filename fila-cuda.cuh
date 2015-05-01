@@ -84,10 +84,11 @@ typedef struct _Fila{
 
 }Fila;
 
-double second() {
-    struct timeval tp;
-    gettimeofday(&tp,NULL);
-    return ((double)tp.tv_sec + (double)tp.tv_usec*1.e-6);
+__host__ __device__ double second() {
+    //struct timeval tp;
+    //gettimeofday(&tp,NULL);
+    //return ((double)tp.tv_sec + (double)tp.tv_usec*1.e-6);
+    return ((double) clock()) / CLOCKS_PER_SEC;
 }
 
 __device__ int fila_index;

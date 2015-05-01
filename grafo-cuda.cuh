@@ -19,6 +19,9 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
+#define MAX_ADJ 10
+texture<int,1,cudaReadModeElementType> textureAresta;
+
 #define ADJACENTE(v, index) arestas[vertices[v].adjacentes[index]]
 #define ADJREVERSO(v, index) (arestas + arestas[vertices[v].adjacentes[index]].reversa)
 #define MIN(x, y) x < y ? x : y
@@ -32,7 +35,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 		ativo[v] = true; \
 	} \
 }
-#define MAX_ADJ 10
 #define BFS_UNROLL_STEP(i) { \
 	if (i < vertice->numAdjacentes) { \
 		Aresta *adj = arestas + vertice->adjacentes[i]; \
@@ -50,7 +52,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 #define RELABEL_DEVICE_UNROLL_STEP(i) { \
 	if (i < tam_adj) { \
-		Aresta *adj = arestas + vertices[v].adjacentes[i]; \
+		Aresta *adj = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i); \
 		if (resCap[adj->id] > 0 && adj->from == v) { \
 			int d = dist[adj->to]; \
 			d++; \
@@ -63,7 +65,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 
 #define DISCHARGE_DEVICE_UNROLL_STEP(i) { \
 	if (i < tam_adj) { \
-		Aresta *a = arestas + vertices[v].adjacentes[i]; \
+		Aresta *a = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i); \
 		ExcessType local_resCap = resCap[a->id]; \
 		if (local_resCap > 0) { \
 			ExcessType delta = MIN(excess[v], local_resCap); \
@@ -142,7 +144,7 @@ typedef struct _Vertice {
 } Vertice;
 
 typedef struct _Grafo Grafo;
-__global__ void pushrelabel_kernel(struct _Grafo *grafo, int mpirank, int nproc, int start);
+__global__ void pushrelabel_kernel(struct _Grafo *grafo, int mpirank, int nproc, int start, int stop);
 __global__ void proxima_fila(Grafo *grafo);
 __global__ void check_bfs(Grafo *grafo, int cycles);
 __global__ void check_flow(Grafo *grafo, ExcessType *fluxoMaximo);
@@ -374,30 +376,31 @@ typedef struct _Grafo {
 	__device__ void DischargeDevice(int v) {
 		int tam_adj = vertices[v].numAdjacentes;
 		int i, jD;
+		ExcessType localExcess = excess[v];
 		do {
 			jD = dist[v] - 1;
-
+			int minD = numVertices;
 			for (i = 0; i < tam_adj; i += 1) {
-				// DISCHARGE_DEVICE_UNROLL_STEP(9 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(8 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(7 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(6 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(5 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(4 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(3 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(2 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(1 + i);
-				// DISCHARGE_DEVICE_UNROLL_STEP(0 + i);
 				if (i < tam_adj) {
 					Aresta *a = arestas + vertices[v].adjacentes[i];
+					//Aresta *a = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i);
 					ExcessType local_resCap = resCap[a->id];
 					if (local_resCap > 0) {
-						ExcessType delta = MIN(excess[v], local_resCap);
+						int local_d = dist[a->to];
+						if (a->from == v) {
+							int d = local_d;
+							d++;
+							if (d < minD) {
+								minD = d;
+							}
+						}
+						ExcessType delta = MIN(localExcess, local_resCap);
 						if (delta > 0) {
-							if (jD >= dist[a->to]) {
-								atomicAdd((unsigned long long *) &resCap[a->id], -delta);
-								atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
-								atomicAdd((unsigned long long *) &excess[v], -delta);
+							if (jD >= local_d) {
+								resCap[a->id] -= delta;
+								resCap[a->reversa] += delta;
+								localExcess = atomicAdd((unsigned long long *) &excess[v], -delta);
+								localExcess -= delta;
 								if (a->to < idInicial) {
 									mensagensAnt[a->msgId].idAresta = a->id;
 									mensagensAnt[a->msgId].delta += delta;
@@ -406,6 +409,7 @@ typedef struct _Grafo {
 									mensagensProx[a->msgId].delta += delta;
 								} else {
 									atomicAdd((unsigned long long *) &excess[a->to], delta);
+									//excess[a->to] += delta;
 								}
 								if (!ativo[a->to] && a->to != numVertices - 1) {
 									ENQUEUE_DEVICE(a->to);
@@ -413,35 +417,15 @@ typedef struct _Grafo {
 							}
 						}
 					}
-					if (excess[v] == 0){break;}
+					if (localExcess == 0){break;}
 				}
 			}
 
 			// if (i >= tam_adj) {
-			if (excess[v] > 0) {
-				if (dist[v] == numVertices){break;}
-				int minD = numVertices;
-
-				for (i = 0; i < tam_adj; i += 10) {
-					if (i < tam_adj) {
-						RELABEL_DEVICE_UNROLL_STEP(9);
-						RELABEL_DEVICE_UNROLL_STEP(8);
-						RELABEL_DEVICE_UNROLL_STEP(7);
-						RELABEL_DEVICE_UNROLL_STEP(6);
-						RELABEL_DEVICE_UNROLL_STEP(5);
-						RELABEL_DEVICE_UNROLL_STEP(4);
-						RELABEL_DEVICE_UNROLL_STEP(3);
-						RELABEL_DEVICE_UNROLL_STEP(2);
-						RELABEL_DEVICE_UNROLL_STEP(1);
-						RELABEL_DEVICE_UNROLL_STEP(0);
-					}
-				}
-
+			if (localExcess > 0) {
 				dist[v] = minD;
 				ENQUEUE_DEVICE(v);
-
-				if (dist[v] == numVertices){break;}
-				// printf("rank = %d | clock = %d\n", v, (int) clock() - (int) c1);
+				if (minD == numVertices){break;}
 			} else {
 				break;
 			}
@@ -467,10 +451,9 @@ typedef struct _Grafo {
 		int tam_adj = vertices[v].numAdjacentes;
 		int minD = numVertices;
 
-		Vertice *vertice = vertices + v;
 		for (int i = 0; i < tam_adj; i++) {
 			if (i < tam_adj) {
-				Aresta *adj = arestas + vertice->adjacentes[i];
+				Aresta *adj = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i);
 				if (resCap[adj->id] > 0 && adj->from == v) {
 					int d = dist[adj->to];
 					d++;
@@ -544,6 +527,7 @@ typedef struct _Grafo {
 					// printf("ativo[%d] = %d\n", i, ativo[i]);
 					numMarcados++;
 					marcado[i] = true;
+					ativo[i] = false;
 					(*excessTotal) -= excess[i];
 				}
 				if (excess[i] == 0) {
@@ -643,13 +627,26 @@ typedef struct _Grafo {
 		ExcessType *fluxoTotal;
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0, tempoTotal = 0, tempoMsg = 0, tempoCopia = 0;
 		unsigned long long i = 0;
-		int num_blocos = (grafo_h->vertices_por_processo / 256) + 1;
+		int num_streams = 4;
+		int num_blocos = ceil((double)grafo_h->vertices_por_processo / (256 * num_streams)) / 2;
+		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
-		int loop_size = 256 * num_blocos * 256;
+		int loop_size = 256 * num_blocos;
 		// dim3 blocks = 128;
 
 		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+
+		int *adjs_h = (int *) malloc(sizeof(int) * grafo_h->numVertices * MAX_ADJ);
+		int *adjs_d;
+		cudaMalloc(&adjs_d, sizeof(int) * grafo_h->numVertices * MAX_ADJ);
+		for (int v = 0; v < grafo_h->numVertices; ++v) {
+			for (int adj = 0; adj < grafo_h->vertices[v].numAdjacentes; ++adj) {
+				adjs_h[v * MAX_ADJ + adj] = grafo_h->vertices[v].adjacentes[adj];
+			}
+		}
+		cudaMemcpy(adjs_d, adjs_h, grafo_h->numVertices * MAX_ADJ * sizeof(int), cudaMemcpyHostToDevice);
+		cudaBindTexture(0, textureAresta, adjs_d, grafo_h->numVertices * MAX_ADJ * sizeof(int));
 
 		double tp1 = second();
 		gpuErrchk( cudaHostAlloc((void **)&fluxoTotal, sizeof(ExcessType), cudaHostAllocMapped) );
@@ -657,31 +654,37 @@ typedef struct _Grafo {
 		*fluxoTotal = 0;
 
 		printf("tempo inicial = %f\n", second() - tp1);
-		cudaStream_t stream1, stream2;
-		gpuErrchk( cudaStreamCreate(&stream1) );
-		gpuErrchk( cudaStreamCreate(&stream2) );
+		cudaStream_t streams[num_streams];
+		for (int s = 0; s < num_streams; ++s) {
+			gpuErrchk( cudaStreamCreate(&streams[s]) );
+		}
 		MPI_Barrier(MPI_COMM_WORLD);
 		tempoTotal = second();
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size) {
-				pushrelabel_kernel<<<blocks, threads_per_block, 0, stream1>>>(this, rank, nproc, start);
+			for (int l = 0; l < 60; ++l) {
+				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
+					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(this, rank, nproc, start, start + loop_size * (2));
+					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[1]>>>(this, rank, nproc, start + loop_size * 2, start + loop_size * (4));
+					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[2]>>>(this, rank, nproc, start + loop_size * 4, start + loop_size * (6));
+					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[3]>>>(this, rank, nproc, start + loop_size * 6, start + loop_size * (8));
+				}
 			}
 			// gpuErrchk( cudaPeekAtLastError() );
 			gpuErrchk( cudaDeviceSynchronize() );
 			tempo2 += second() - tempo1;
 
 			tempoMsg = second();
-			if (i % 60 == 0) {
-				// gpuErrchk( cudaDeviceSynchronize() );
+			if (i % 1 == 0) {
 
 				tempoCopia = second();
-				gpuErrchk( cudaMemcpy(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost) );
-				gpuErrchk( cudaMemcpy(grafo_h->ativo, grafo_tmp->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
+				gpuErrchk( cudaMemcpyAsync(grafo_h->resCap, grafo_tmp->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyDeviceToHost, streams[0]) );
+				gpuErrchk( cudaMemcpyAsync(grafo_h->ativo, grafo_tmp->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[1]) );
 				// gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
-				gpuErrchk( cudaMemcpy(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
+				gpuErrchk( cudaMemcpyAsync(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[2]) );
+				gpuErrchk( cudaDeviceSynchronize() );
 				tempoTotal += second() - tempoCopia;
 
 				if (nproc > 1) {
@@ -830,7 +833,7 @@ typedef struct _Grafo {
 					}
 				} else {
 					tempo1 = second();
-					gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
+					gpuErrchk( cudaMemcpyAsync(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[0]) );
 					grafo_h->bfs(&filaBfs);
 					tempo3 += second() - tempo1;
 				}
@@ -866,14 +869,14 @@ typedef struct _Grafo {
 
 				tempoCopia = second();
 				if (nproc > 1) {
-					gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, grafo_h->mensagensAnt, sizeof(Mensagem) * grafo_h->numVizinhosAnt, cudaMemcpyHostToDevice, stream1) ) ;
-					gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, grafo_h->mensagensProx, sizeof(Mensagem) * grafo_h->numVizinhosProx, cudaMemcpyHostToDevice, stream2) );
-					gpuErrchk( cudaMemcpyAsync(grafo_tmp->resCap, grafo_h->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyHostToDevice, stream2) );
+					gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, grafo_h->mensagensAnt, sizeof(Mensagem) * grafo_h->numVizinhosAnt, cudaMemcpyHostToDevice, streams[0]) ) ;
+					gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, grafo_h->mensagensProx, sizeof(Mensagem) * grafo_h->numVizinhosProx, cudaMemcpyHostToDevice, streams[1]) );
+					gpuErrchk( cudaMemcpyAsync(grafo_tmp->resCap, grafo_h->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyHostToDevice, streams[2]) );
 				}
 
-				gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice, stream1) );
-				gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, stream1) );
-				gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, stream2) );
+				gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[0]) );
+				gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
+				gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
 				gpuErrchk( cudaDeviceSynchronize() );
 				tempoTotal += second() - tempoCopia;
 			}
@@ -911,17 +914,21 @@ typedef struct _Grafo {
 
 #define VERTICES_POR_THREAD 2
 
-__global__ void pushrelabel_kernel(Grafo *grafo, const int mpirank, const int nproc, int start) {
+__global__ void pushrelabel_kernel(Grafo *grafo, const int mpirank, const int nproc, int start, int stop) {
 	const int rankBase = getRank() * VERTICES_POR_THREAD + start;
 	const int tamanho = grafo->idFinal;
 
 	#pragma unroll
 	for (int i = 0; i < VERTICES_POR_THREAD; ++i) {
 		int rank = rankBase + i;
-		if (rank <= tamanho) {
+		if (rank < stop && rank <= tamanho) {
 			if (grafo->ativo[rank] && grafo->excess[rank] > 0) {
 				grafo->ativo[rank] = false;
+				clock_t t1 = clock();
 				grafo->DischargeDevice(rank);
+				clock_t t2 = clock();
+				double tempo = ((double)t2 - t1) / (CLOCKS_PER_SEC);
+				//printf("tempo discharge %d | %f\n", rank, tempo);
 			}
 		}
 	}
