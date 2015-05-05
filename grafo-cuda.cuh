@@ -19,8 +19,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-#define MAX_ADJ 10
-texture<int,1,cudaReadModeElementType> textureAresta;
+#define MAX_ADJ 100
 
 #define ADJACENTE(v, index) arestas[vertices[v].adjacentes[index]]
 #define ADJREVERSO(v, index) (arestas + arestas[vertices[v].adjacentes[index]].reversa)
@@ -52,7 +51,7 @@ texture<int,1,cudaReadModeElementType> textureAresta;
 }
 #define RELABEL_DEVICE_UNROLL_STEP(i) { \
 	if (i < tam_adj) { \
-		Aresta *adj = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i); \
+		Aresta *adj = arestas + vertices[v].adjacentes[i]; \
 		if (resCap[adj->id] > 0 && adj->from == v) { \
 			int d = dist[adj->to]; \
 			d++; \
@@ -65,15 +64,24 @@ texture<int,1,cudaReadModeElementType> textureAresta;
 
 #define DISCHARGE_DEVICE_UNROLL_STEP(i) { \
 	if (i < tam_adj) { \
-		Aresta *a = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i); \
+		Aresta *a = arestas + vertices[v].adjacentes[i]; \
 		ExcessType local_resCap = resCap[a->id]; \
 		if (local_resCap > 0) { \
-			ExcessType delta = MIN(excess[v], local_resCap); \
+			int local_d = dist[a->to]; \
+			if (a->from == v) { \
+				int d = local_d; \
+				d++; \
+				if (d < minD) { \
+					minD = d; \
+				} \
+			} \
+			ExcessType delta = MIN(localExcess, local_resCap); \
 			if (delta > 0) { \
-				if (jD == dist[a->to]) { \
-					atomicAdd((unsigned long long *) &resCap[a->id], -delta); \
-					atomicAdd((unsigned long long *) &resCap[a->reversa], delta); \
-					atomicAdd((unsigned long long *) &excess[v], -delta); \
+				if (jD >= local_d) { \
+					resCap[a->id] -= delta; \
+					resCap[a->reversa] += delta; \
+					localExcess = atomicAdd((unsigned long long *) &excess[v], -delta); \
+					localExcess -= delta; \
 					if (a->to < idInicial) { \
 						mensagensAnt[a->msgId].idAresta = a->id; \
 						mensagensAnt[a->msgId].delta += delta; \
@@ -89,7 +97,7 @@ texture<int,1,cudaReadModeElementType> textureAresta;
 				} \
 			} \
 		} \
-		if (excess[v] == 0){break;} \
+		if (localExcess == 0){break;} \
 	} \
 }
 
@@ -128,7 +136,7 @@ typedef struct _Aresta {
 typedef struct _Vertice {
 	int label;
 	bool fronteira;
-	int adjacentes[10];
+	int adjacentes[MAX_ADJ];
 	int numAdjacentes;
 
 	void init(int _label) {
@@ -381,9 +389,8 @@ typedef struct _Grafo {
 			jD = dist[v] - 1;
 			int minD = numVertices;
 			for (i = 0; i < tam_adj; i += 1) {
-				if (i < tam_adj) {
+				// if (i < tam_adj) {
 					Aresta *a = arestas + vertices[v].adjacentes[i];
-					//Aresta *a = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i);
 					ExcessType local_resCap = resCap[a->id];
 					if (local_resCap > 0) {
 						int local_d = dist[a->to];
@@ -418,7 +425,7 @@ typedef struct _Grafo {
 						}
 					}
 					if (localExcess == 0){break;}
-				}
+				// }
 			}
 
 			// if (i >= tam_adj) {
@@ -453,7 +460,7 @@ typedef struct _Grafo {
 
 		for (int i = 0; i < tam_adj; i++) {
 			if (i < tam_adj) {
-				Aresta *adj = arestas + tex1Dfetch(textureAresta, v * MAX_ADJ + i);
+				Aresta *adj = arestas + vertices[v].adjacentes[i];
 				if (resCap[adj->id] > 0 && adj->from == v) {
 					int d = dist[adj->to];
 					d++;
@@ -464,8 +471,10 @@ typedef struct _Grafo {
 			}
 		}
 
-		dist[v] = minD;
-		ENQUEUE_DEVICE(v);
+		if (excess[v] > 0) {
+			dist[v] = minD;
+			ENQUEUE_DEVICE(v);
+		}
 
 		return minD;
 	}
@@ -646,7 +655,6 @@ typedef struct _Grafo {
 			}
 		}
 		cudaMemcpy(adjs_d, adjs_h, grafo_h->numVertices * MAX_ADJ * sizeof(int), cudaMemcpyHostToDevice);
-		cudaBindTexture(0, textureAresta, adjs_d, grafo_h->numVertices * MAX_ADJ * sizeof(int));
 
 		double tp1 = second();
 		gpuErrchk( cudaHostAlloc((void **)&fluxoTotal, sizeof(ExcessType), cudaHostAllocMapped) );
@@ -664,7 +672,7 @@ typedef struct _Grafo {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int l = 0; l < 60; ++l) {
+			for (int l = 0; l < 50; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(this, rank, nproc, start, start + loop_size * (2));
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[1]>>>(this, rank, nproc, start + loop_size * 2, start + loop_size * (4));
@@ -924,10 +932,10 @@ __global__ void pushrelabel_kernel(Grafo *grafo, const int mpirank, const int np
 		if (rank < stop && rank <= tamanho) {
 			if (grafo->ativo[rank] && grafo->excess[rank] > 0) {
 				grafo->ativo[rank] = false;
-				clock_t t1 = clock();
+				// clock_t t1 = clock();
 				grafo->DischargeDevice(rank);
-				clock_t t2 = clock();
-				double tempo = ((double)t2 - t1) / (CLOCKS_PER_SEC);
+				// clock_t t2 = clock();
+				// double tempo = ((double)t2 - t1) / (CLOCKS_PER_SEC);
 				//printf("tempo discharge %d | %f\n", rank, tempo);
 			}
 		}
