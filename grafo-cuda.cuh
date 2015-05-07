@@ -37,11 +37,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define BFS_UNROLL_STEP(i) { \
 	if (i < vertice->numAdjacentes) { \
 		Aresta *adj = arestas + vertice->adjacentes[i]; \
-		/* if (adj->to == 0 || adj->from == 0) { \
-			chegouFonte = true; \
-		} */ \
 		if (dist[adj->to] == numVertices) { \
-			if (resCap[adj->reversa] > 0 && adj->from == v) { \
+			if (resCap[adj->reversa] > 0 && !marcado[adj->to]) { \
 				numVisitados++; \
 				dist[adj->to] = novaDistancia; \
 				bfsQ->enfileirar(adj->to); \
@@ -151,13 +148,22 @@ typedef struct _Vertice {
 	}
 } Vertice;
 
+typedef struct _LinhaArquivo {
+	int from;
+	int to;
+	int cap;
+
+	void init(int from, int to, int cap) {
+		this->from = from;
+		this->to = to;
+		this->cap = cap;
+	}
+} LinhaArquivo;
+
 typedef struct _Grafo Grafo;
 __global__ void pushrelabel_kernel(struct _Grafo *grafo, int mpirank, int nproc, int start, int stop);
-__global__ void proxima_fila(Grafo *grafo);
-__global__ void check_bfs(Grafo *grafo, int cycles);
-__global__ void check_flow(Grafo *grafo, ExcessType *fluxoMaximo);
-__global__ void check_fim(Grafo *grafo, bool *continuar);
-
+__global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua);
+__global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua);
 
 typedef struct _Mensagem{
 	int idAresta;
@@ -237,6 +243,7 @@ typedef struct _Grafo {
 		if (fgets(line, 50, file) == NULL) {
 			printf("Erro!\n");
 		}
+
 		if (line[0] == 'c' || line[0] == 'p') {
 			do {
 				if (line[0] == 'p') {
@@ -246,6 +253,8 @@ typedef struct _Grafo {
 				} else if (line[0] == 'a') {
 					sscanf(line, "%*c %d %d %d", &a, &b, &c);
 					novoGrafo->AdicionarAresta(a - 1, b - 1, c);
+					// linhas[a - 1][numAdjacentes[a - 1]].init(a - 1, b - 1, c);
+					// numAdjacentes[a - 1]++;
 				}
 
 			} while (fgets(line, 50, file) != NULL);
@@ -260,8 +269,10 @@ typedef struct _Grafo {
 				novoGrafo->AdicionarAresta(a, b, c);
 			}
 		}
+
 		novoGrafo->mensagensAnt = new Mensagem[novoGrafo->numVizinhosAnt];
 		novoGrafo->mensagensProx = new Mensagem[novoGrafo->numVizinhosProx];
+
 		printf("rank %d | numVizinhosAnt %d | numVizinhosProx %d\n", rank, novoGrafo->numVizinhosAnt, novoGrafo->numVizinhosProx);
 		return novoGrafo;
 	}
@@ -404,8 +415,10 @@ typedef struct _Grafo {
 						ExcessType delta = MIN(localExcess, local_resCap);
 						if (delta > 0) {
 							if (jD >= local_d) {
-								resCap[a->id] -= delta;
-								resCap[a->reversa] += delta;
+								// resCap[a->id] -= delta;
+								// resCap[a->reversa] += delta;
+								atomicAdd((unsigned long long *) &resCap[a->id], -delta);
+								atomicAdd((unsigned long long *) &resCap[a->reversa], delta);
 								localExcess = atomicAdd((unsigned long long *) &excess[v], -delta);
 								localExcess -= delta;
 								if (a->to < idInicial) {
@@ -483,9 +496,48 @@ typedef struct _Grafo {
 		return excess[numVertices - 1];
 	}
 
+	__host__ bool bfsDevice(Grafo *grafo_d) {
+		bool *visitados = (bool *) calloc(numVertices, sizeof(bool));
+		bool *ativos = (bool *) calloc(numVertices, sizeof(bool));
+		bool *ativos_d;
+		bool *visitados_d;
+		bool *continua = new bool;
+		bool *continua_d;
+		gpuErrchk( cudaMalloc((void **) &visitados_d, sizeof(bool) * numVertices) );
+		gpuErrchk( cudaMalloc((void **) &ativos_d, sizeof(bool) * numVertices) );
+		gpuErrchk( cudaMalloc((void **) &continua_d, sizeof(bool)) );
+
+		ativos[numVertices - 1] = true;
+		visitados[numVertices - 1] = true;
+		gpuErrchk( cudaMemcpy(ativos_d, ativos, sizeof(bool) * numVertices, cudaMemcpyHostToDevice) );
+		gpuErrchk( cudaMemcpy(visitados_d, visitados, sizeof(bool) * numVertices, cudaMemcpyHostToDevice) );
+
+		dim3 blocos = numVertices % 256 == 0 ? numVertices / 256 : numVertices / 256 + 1;
+
+		*continua = true;
+		while(*continua) {
+			*continua = false;
+			gpuErrchk( cudaMemcpy(continua_d, continua, sizeof(bool), cudaMemcpyHostToDevice) );
+			bfs_step<<<blocos, 256>>>(grafo_d, visitados_d, ativos_d, continua_d);
+			gpuErrchk( cudaMemcpy(continua, continua_d, sizeof(bool), cudaMemcpyDeviceToHost) );
+			// printf("continua = %d\n", *continua);
+		}
+		gpuErrchk( cudaPeekAtLastError() );
+
+		gpuErrchk( cudaMemcpy(visitados, visitados_d, sizeof(bool) * numVertices, cudaMemcpyDeviceToHost) );
+		for (int i = 0; i < numVertices; ++i) {
+			if (!visitados[i] && !marcado[i]) {
+				marcado[i] = true;
+				(*excessTotal) = (*excessTotal) - excess[i];
+			}
+		}
+
+		return false;
+	}
+
 	__host__ int bfs(Fila *bfsQ) {
 		// printf("global update!\n");
-		// double time1 = second();
+		double time1 = second();
 		// Fila *bfsQ = new Fila;
 		bfsQ->reset();
 		int aSize = 0;
@@ -520,7 +572,7 @@ typedef struct _Grafo {
 				for (int i = 0; i < vertice->numAdjacentes; i++) {
 					Aresta *adj = arestas + vertice->adjacentes[i];
 					if (dist[adj->to] == numVertices && resCap[adj->reversa] > 0) {
-						if (adj->from == v && dist[adj->to] != novaDistancia) {
+						if (dist[adj->to] != novaDistancia && !marcado[adj->to]) {
 							numVisitados++;
 							dist[adj->to] = novaDistancia;
 							bfsQ->enfileirar(adj->to);
@@ -547,6 +599,7 @@ typedef struct _Grafo {
 
 		dist[0] = numVertices;
 
+		printf("tempo bfs = %f\n", second() - time1);
 		// printf("numVisitados = %d | aSize = %d | marcados = %d | chegouFonte = %d | e[0] = %llu | e[n-1] = %llu | excessTotal = %llu\n", numVisitados, aSize, numMarcados, chegouFonte, excess[0], excess[numVertices - 1], *excessTotal);
 
 		return (numMarcados == 0 && chegouFonte == 0) || aSize == 0;
@@ -570,12 +623,12 @@ typedef struct _Grafo {
 		}
 
 		// int contador = 0;
-		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 1000) {
+		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 1500) {
 		// 	int v = filaAtivos->desenfileirar();
 		// 	if (v == numVertices - 1) continue;
 		// 	ativo[v] = false;
 		// 	Discharge(v, filaAtivos);
-		// 	if (contador++ >= numVertices * 2) {
+		// 	if (contador++ >= numVertices * 4) {
 		// 		// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
 		// 		bfs(&filaBfs);
 		// 		if (achouFluxoMaximo()) break;
@@ -672,7 +725,7 @@ typedef struct _Grafo {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int l = 0; l < 50; ++l) {
+			for (int l = 0; l < 30; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(this, rank, nproc, start, start + loop_size * (2));
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[1]>>>(this, rank, nproc, start + loop_size * 2, start + loop_size * (4));
@@ -843,6 +896,7 @@ typedef struct _Grafo {
 					tempo1 = second();
 					gpuErrchk( cudaMemcpyAsync(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[0]) );
 					grafo_h->bfs(&filaBfs);
+					// grafo_h->bfsDevice(this);
 					tempo3 += second() - tempo1;
 				}
 
@@ -871,7 +925,7 @@ typedef struct _Grafo {
 					}
 				}
 				if (sair) {
-					grafo_h->bfs(&filaBfs);
+					// grafo_h->bfs(&filaBfs);
 					break;
 				}
 
@@ -942,7 +996,29 @@ __global__ void pushrelabel_kernel(Grafo *grafo, const int mpirank, const int np
 	}
 }
 
-__global__ void check_flow(Grafo *grafo, ExcessType *fluxoMaximo) {
-	printf("Fluxo máximo gpu %d\n", grafo->fluxoTotal());
-	*fluxoMaximo = grafo->fluxoTotal();
+__global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua) {
+	int rank = getRank();
+	int loop = 20;
+	while (loop-- > 0) {
+		if (rank < grafo->numVertices && ativos[rank]) {
+			ativos[rank] = false;
+			visitados[rank] = true;
+			for (int i = 0; i < grafo->vertices[rank].numAdjacentes; ++i) {
+				Aresta *adj = grafo->arestas + grafo->vertices[rank].adjacentes[i];
+				if (grafo->resCap[adj->reversa] > 0 && !visitados[adj->to]) {
+					grafo->dist[adj->to] = grafo->dist[rank] + 1;
+					ativos[adj->to] = true;
+					visitados[adj->to] = true;
+					*continua = true;
+				}
+			}
+		}
+	}
+}
+
+__global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua) {
+	int rank = getRank();
+	if (rank < grafo->numVertices && ativos[rank]) {
+		*continua = true;
+	}
 }
