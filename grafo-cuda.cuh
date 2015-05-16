@@ -9,6 +9,7 @@
 #include <algorithm>
 #include "fila-cuda.cuh"
 #include <thrust/system/cpp/execution_policy.h>
+#include <cuda_runtime.h>
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -22,8 +23,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 
 #define MAX_ADJ 10
 
-#define ADJACENTE(v, index) arestas[vertices[v].adjacentes[index]]
-#define ADJREVERSO(v, index) (arestas + arestas[vertices[v].adjacentes[index]].reversa)
 #define MIN(x, y) x < y ? x : y
 #define MAX(x, y) x > y ? x : y
 #define ENQUEUE(v) { \
@@ -37,7 +36,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 #define BFS_UNROLL_STEP(i) { \
 	if (i < vertice->numAdjacentes) { \
-		Aresta *adj = arestas + vertice->adjacentes[i]; \
+		Aresta *adj = vertice->adjacentesA + i; \
 		if (dist[adj->to] == numVertices && resCap[adj->reversa] > 0 && !marcado[adj->to]) { \
 			numVisitados++; \
 			dist[adj->to] = novaDistancia; \
@@ -79,15 +78,15 @@ typedef struct _Aresta {
 } Aresta;
 
 typedef struct _Vertice {
-	int adjacentes[MAX_ADJ];
+	Aresta adjacentesA[MAX_ADJ];
 	int numAdjacentes;
 
 	void init(int _label) {
 		numAdjacentes = 0;
 	}
 
-	void AdicionarAdjacente(int index) {
-		adjacentes[numAdjacentes] = index;
+	void AdicionarAdjacente(Aresta a) {
+		adjacentesA[numAdjacentes] = a;
 		numAdjacentes++;
 	}
 } Vertice;
@@ -116,7 +115,9 @@ typedef struct _Mensagem{
 } Mensagem;
 
 typedef struct _Grafo Grafo;
-__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
+
+__global__ void copyAresta(Vertice *vertices, Aresta *arestas, int numVertices);
+__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx);
 __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua);
 __global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua);
@@ -214,10 +215,11 @@ typedef struct _Grafo {
 				novoGrafo->AdicionarAresta(a, b, c);
 			}
 		}
+		fclose(file);
 
-		for (int i = 0; i < novoGrafo->numVertices; ++i) {
-			thrust::sort(novoGrafo->vertices[i].adjacentes, novoGrafo->vertices[i].adjacentes + novoGrafo->vertices[i].numAdjacentes);
-		}
+		// for (int i = 0; i < novoGrafo->numVertices; ++i) {
+		// 	thrust::sort(novoGrafo->vertices[i].adjacentes, novoGrafo->vertices[i].adjacentes + novoGrafo->vertices[i].numAdjacentes);
+		// }
 
 		novoGrafo->mensagensAnt = new Mensagem[novoGrafo->numVizinhosAnt];
 		novoGrafo->mensagensProx = new Mensagem[novoGrafo->numVizinhosProx];
@@ -229,11 +231,11 @@ typedef struct _Grafo {
 	void AdicionarAresta(int from, int to, int cap) {
 		resCap[numArestas] = cap;
 		arestas[numArestas].init(from, to, numArestas, vertices[to].numAdjacentes, numArestas + 1, (from >= idInicial || from <= idFinal));
-		vertices[from].AdicionarAdjacente(numArestas);
+		vertices[from].AdicionarAdjacente(arestas[numArestas]);
 		numArestas++;
 		resCap[numArestas] = 0;
 		arestas[numArestas].init(to, from, numArestas, vertices[from].numAdjacentes - 1, numArestas - 1, (from >= idInicial || from <= idFinal));
-		vertices[to].AdicionarAdjacente(numArestas);
+		vertices[to].AdicionarAdjacente(arestas[numArestas]);
 		numArestas++;
 
 		if (abs(from - to) > vertices_por_processo) {
@@ -272,7 +274,7 @@ typedef struct _Grafo {
 		do {
 			int i;
 			for (i = 0; excess[v] > 0 && i < tam_adj; i++) {
-				Push(&ADJACENTE(v, i), filaAtivos);
+				Push(vertices[v].adjacentesA + i, filaAtivos);
 				if (excess[v] == 0) break;
 			}
 			if (i >= tam_adj) {
@@ -281,7 +283,7 @@ typedef struct _Grafo {
 
 				for (i = 0; i < tam_adj; i++) {
 					if (i < tam_adj) {
-						Aresta *adj = arestas + vertices[v].adjacentes[i];
+						Aresta *adj = vertices[v].adjacentesA + i;
 						if (resCap[adj->id] > 0 && adj->from == v) {
 							int d_tmp = dist[adj->to];
 							d_tmp++;
@@ -322,7 +324,7 @@ typedef struct _Grafo {
 		int minD = numVertices;
 
 		for (int i = 0; i < tam_adj; i++) {
-			Aresta *adj = &ADJACENTE(v, i);
+			Aresta *adj = vertices[v].adjacentesA + i;
 			if (resCap[adj->id] != 0) {
 				int d = dist[adj->to];
 				d++;
@@ -415,7 +417,7 @@ typedef struct _Grafo {
 				BFS_UNROLL_STEP(0);
 			} else {
 				for (int i = 0; i < vertice->numAdjacentes; i++) {
-					Aresta *adj = arestas + vertice->adjacentes[i];
+					Aresta *adj = vertice->adjacentesA + i;
 					if (resCap[adj->reversa] > 0 && dist[adj->to] == numVertices && !marcado[adj->to]) {
 						numVisitados++;
 						dist[adj->to] = novaDistancia;
@@ -458,10 +460,10 @@ typedef struct _Grafo {
 		filaAtivos->init();
 
 		for (int i = 0; i < vertices[0].numAdjacentes; i++) {
-			Aresta *adjacente = &ADJACENTE(0, i);
+			Aresta *adjacente = vertices[0].adjacentesA + i;
 			excess[0] += resCap[adjacente->id];
 			(*excessTotal) += excess[0];
-			Push(&ADJACENTE(0, i), filaAtivos);
+			Push(adjacente, filaAtivos);
 		}
 
 		// int contador = 0;
@@ -500,22 +502,18 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMalloc(&grafo_tmp->excess, sizeof(ExcessType) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->resCap, sizeof(CapType) * numArestas) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->dist, sizeof(int) * numVertices) );
-		gpuErrchk( cudaMalloc(&grafo_tmp->arestas, sizeof(Aresta) * numArestas) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->ativo, sizeof(int) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensAnt, sizeof(Mensagem) * numVizinhosAnt) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensProx, sizeof(Mensagem) * numVizinhosProx) );
-		gpuErrchk( cudaMalloc(&grafo_d, sizeof(Grafo)) );
 
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->vertices, vertices_tmp, sizeof(Vertice) * numVertices, cudaMemcpyHostToDevice, cs[2]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, excess, sizeof(ExcessType) * numVertices, cudaMemcpyHostToDevice, cs[3]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->resCap, resCap, sizeof(CapType) * numArestas, cudaMemcpyHostToDevice, cs[4]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, dist, sizeof(int) * numVertices, cudaMemcpyHostToDevice, cs[5]) );
-		gpuErrchk( cudaMemcpyAsync(grafo_tmp->arestas, arestas, sizeof(Aresta) * numArestas, cudaMemcpyHostToDevice, cs[6]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, ativo, sizeof(int) * numVertices, cudaMemcpyHostToDevice, cs[7]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, mensagensAnt, sizeof(Mensagem) * numVizinhosAnt, cudaMemcpyHostToDevice, cs[8]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, mensagensProx, sizeof(Mensagem) * numVizinhosProx, cudaMemcpyHostToDevice, cs[9]) );
 
-		gpuErrchk( cudaMemcpyAsync(grafo_d, grafo_tmp, sizeof(Grafo), cudaMemcpyHostToDevice, cs[9]) );
 		gpuErrchk( cudaDeviceSynchronize() );
 		printf("Tempo alocação = %f\n", second() - tempo1);
 		GrafoAloc grafo_aloc;
@@ -533,7 +531,6 @@ typedef struct _Grafo {
 		unsigned long long i = 0;
 		int num_streams = 4;
 		int num_blocos = ceil((double)grafo_h->vertices_por_processo / (256 * num_streams)) / 2;
-		// int num_blocos = 16	;
 		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
@@ -552,6 +549,9 @@ typedef struct _Grafo {
 		for (int s = 0; s < num_streams; ++s) {
 			gpuErrchk( cudaStreamCreate(&streams[s]) );
 		}
+
+		cudaDeviceSynchronize();
+
 		cudaEvent_t start, stop;
 		float elapsed;
 		cudaEventCreate(&start);
@@ -566,16 +566,16 @@ typedef struct _Grafo {
 			for (int l = 0; l < 60; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
-						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
+						grafo_h->numVertices, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[1]>>>(start + loop_size * 2, start + loop_size * (4), grafo_tmp->vertices,
-						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
+						grafo_h->numVertices, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[2]>>>(start + loop_size * 4, start + loop_size * (6), grafo_tmp->vertices,
-						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
+						grafo_h->numVertices, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[3]>>>(start + loop_size * 6, start + loop_size * (8), grafo_tmp->vertices,
-						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
+						grafo_h->numVertices, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 				}
 			}
@@ -826,13 +826,13 @@ typedef struct _Grafo {
 
 #define VERTICES_POR_THREAD 2
 
-__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
+__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx) {
 	const int rankBase = getRank() * VERTICES_POR_THREAD + start;
 
 	#pragma unroll
-	for (int i = 0; i < VERTICES_POR_THREAD; ++i) {
-		int rank = rankBase + i;
+	for (int t = 0; t < VERTICES_POR_THREAD; ++t) {
+		int rank = rankBase + t;
 		if (rank < stop && rank <= idFinal) {
 			if (ativo[rank] && excess[rank] > 0) {
 				ativo[rank] = false;
@@ -844,7 +844,7 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 					int minD = numVertices;
 					int i;
 					for (i = current; i < tam_adj; ++i) {
-						Aresta *a = arestas + vertices[v].adjacentes[i];
+						Aresta *a = vertices[v].adjacentesA + i;
 						if (resCap[a->id] > 0) {
 							int local_d = dist[a->to];
 							if (local_d < minD) {
@@ -876,8 +876,6 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 						}
 					}
 
-					// minD++;
-
 					if (excess[v] > 0 && minD < numVertices) {
 						jD = minD + 1;
 						dist[v] = jD;
@@ -901,7 +899,7 @@ __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *cont
 			ativos[rank] = false;
 			visitados[rank] = true;
 			for (int i = 0; i < grafo->vertices[rank].numAdjacentes; ++i) {
-				Aresta *adj = grafo->arestas + grafo->vertices[rank].adjacentes[i];
+				Aresta *adj = grafo->vertices[rank].adjacentesA + i;
 				if (grafo->resCap[adj->reversa] > 0 && !visitados[adj->to]) {
 					grafo->dist[adj->to] = grafo->dist[rank] + 1;
 					ativos[adj->to] = true;

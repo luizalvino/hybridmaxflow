@@ -22,7 +22,7 @@ int main(int argc, char *argv[]) {
 	printf("proc %d | maxFlowInit tempo = %f\n", rank, second() - tempo1);
 	GrafoAloc grafo_aloc = grafo->alocaGrafoDevice();
 	ExcessType fluxo = grafo_aloc.grafo_d->fluxoTotalDevice(grafo, grafo_aloc.grafo_tmp, rank, nprocs);
-	MPI_Finalize();
 	grafo->finalizar();
+	MPI_Finalize();
 	return 0;
 }
