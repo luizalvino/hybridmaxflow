@@ -35,8 +35,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 	} \
 }
 #define BFS_UNROLL_STEP(i) { \
-	if (i < stop) { \
-		Aresta adj = arestas[i]; \
+	if (i < tam_adj) { \
+		Aresta adj = arestas[i + inicial]; \
 		if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) { \
 			numVisitados++; \
 			dist[adj.to] = novaDistancia; \
@@ -219,10 +219,10 @@ typedef struct _Grafo {
 			if (a.from != current) {
 				current = a.from;
 				novoGrafo->vertices[a.from].inicial = i;
-				if (current > 0) novoGrafo->vertices[current - 1].final = i - 1;
+				if (current > 0) novoGrafo->vertices[current - 1].final = i;
 			}
 		}
-		novoGrafo->vertices[novoGrafo->numVertices - 1].final = novoGrafo->numArestas - 1;
+		novoGrafo->vertices[novoGrafo->numVertices - 1].final = novoGrafo->numArestas;
 
 		novoGrafo->mensagensAnt = new Mensagem[novoGrafo->numVizinhosAnt];
 		novoGrafo->mensagensProx = new Mensagem[novoGrafo->numVizinhosProx];
@@ -401,18 +401,16 @@ typedef struct _Grafo {
 			int stop = vertices[v].final;
 			int tam_adj = stop - inicial;
 			if (tam_adj <= 10) {
-				int ids[10] = {inicial, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-				thrust::inclusive_scan(ids, ids + 10, ids);
-				BFS_UNROLL_STEP(ids[9]);
-				BFS_UNROLL_STEP(ids[8]);
-				BFS_UNROLL_STEP(ids[7]);
-				BFS_UNROLL_STEP(ids[6]);
-				BFS_UNROLL_STEP(ids[5]);
-				BFS_UNROLL_STEP(ids[4]);
-				BFS_UNROLL_STEP(ids[3]);
-				BFS_UNROLL_STEP(ids[2]);
-				BFS_UNROLL_STEP(ids[1]);
-				BFS_UNROLL_STEP(ids[0]);
+				BFS_UNROLL_STEP(9);
+				BFS_UNROLL_STEP(8);
+				BFS_UNROLL_STEP(7);
+				BFS_UNROLL_STEP(6);
+				BFS_UNROLL_STEP(5);
+				BFS_UNROLL_STEP(4);
+				BFS_UNROLL_STEP(3);
+				BFS_UNROLL_STEP(2);
+				BFS_UNROLL_STEP(1);
+				BFS_UNROLL_STEP(0);
 			} else {
 				for (int i = inicial; i < stop; ++i) {
 					Aresta adj = arestas[i];
