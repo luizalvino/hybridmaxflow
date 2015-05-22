@@ -38,7 +38,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 	if (i < tam_adj) { \
 		Aresta adj = arestas[i + inicial]; \
 		if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) { \
-			numVisitados++; \
 			dist[adj.to] = novaDistancia; \
 			bfsQ->enfileirar(adj.to); \
 		} \
@@ -82,6 +81,19 @@ struct ComparaArestaFrom {
 	}
 };
 
+struct ComparaArestaFromDist {
+	int *dist;
+
+	ComparaArestaFromDist(int *dist) {
+		this->dist = dist;
+	}
+
+	__host__ __device__
+	bool operator()(const Aresta &a1, const Aresta &a2) {
+		return a1.from == a2.from ? dist[a1.to] < dist[a2.to] : a1.from < a2.from;
+	}
+};
+
 typedef struct _Vertice {
 	int inicial;
 	int final;
@@ -112,8 +124,7 @@ typedef struct _Mensagem{
 
 typedef struct _Grafo Grafo;
 
-__global__ void copyAresta(Vertice *vertices, Aresta *arestas, int numVertices);
-__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
+__global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx);
 __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua);
 __global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua);
@@ -375,14 +386,13 @@ typedef struct _Grafo {
 		return false;
 	}
 
-	__host__ int bfs(Fila *bfsQ) {
+	__host__ int bfs(Fila *bfsQ, int cycle) {
 		// printf("global update!\n");
 		double time1 = second();
 		// Fila *bfsQ = new Fila;
 		bfsQ->reset();
 		int aSize = 0;
 		int numMarcados = 0;
-		int numVisitados = 0;
 		bool chegouFonte = false;
 
 		thrust::fill(dist + 1, dist + numVertices, numVertices);
@@ -412,10 +422,10 @@ typedef struct _Grafo {
 				BFS_UNROLL_STEP(1);
 				BFS_UNROLL_STEP(0);
 			} else {
+				// #pragma omp parallel for
 				for (int i = inicial; i < stop; ++i) {
 					Aresta adj = arestas[i];
-					if (resCap[adj.reversa] > 0 && dist[adj.to] == numVertices && !marcado[adj.to]) {
-						numVisitados++;
+					if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) {
 						dist[adj.to] = novaDistancia;
 						bfsQ->enfileirar(adj.to);
 					}
@@ -423,17 +433,14 @@ typedef struct _Grafo {
 			}
 		}
 
-		if (*excessTotal > 0 && numVisitados < numVertices - 2) {
-			for (int i = 1; i < numVertices - 1; i++) {
+		if (*excessTotal > 0) {
+			for (int i = 1; i < numVertices - 1; ++i) {
 				if (dist[i] == numVertices && !marcado[i]) {
 					// printf("ativo[%d] = %d\n", i, ativo[i]);
 					numMarcados++;
 					marcado[i] = true;
 					ativo[i] = false;
 					(*excessTotal) -= excess[i];
-				}
-				if (excess[i] == 0) {
-					ativo[i] = false;
 				}
 			}
 		}
@@ -449,7 +456,8 @@ typedef struct _Grafo {
 	__host__ void maxFlowInit() {
 		double tempo1 = second();
 		Fila filaBfs;
-		bfs(&filaBfs);
+		bfs(&filaBfs, 0);
+		thrust::sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
 		printf("bfs inicial tempo = %f\n", second() - tempo1);
 
 		Fila *filaAtivos = new Fila;
@@ -559,9 +567,9 @@ typedef struct _Grafo {
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
-			// tempo1 = second();
+			// tempo1 = second()
 			cudaEventRecord(start, 0);
-			for (int l = 0; l < 60; ++l) {
+			for (int l = 0; l < 200; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
@@ -731,7 +739,7 @@ typedef struct _Grafo {
 						free(buffRecv);
 						tempo1 = second();
 						gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
-						grafo_h->bfs(&filaBfs);
+						grafo_h->bfs(&filaBfs, i);
 						tempo3 += second() - tempo1;
 						tempoSend = second();
 						for (int j = 0; j < nproc - 1; j++) {
@@ -743,7 +751,7 @@ typedef struct _Grafo {
 				} else {
 					tempo1 = second();
 					gpuErrchk( cudaMemcpyAsync(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[0]) );
-					grafo_h->bfs(&filaBfs);
+					grafo_h->bfs(&filaBfs, i);
 					// grafo_h->bfsDevice(this);
 					tempo3 += second() - tempo1;
 				}
@@ -786,7 +794,7 @@ typedef struct _Grafo {
 
 				gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[0]) );
 				gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
-				gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
+				//gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
 				gpuErrchk( cudaDeviceSynchronize() );
 				tempoTotal += second() - tempoCopia;
 			}
@@ -824,7 +832,7 @@ typedef struct _Grafo {
 
 #define VERTICES_POR_THREAD 2
 
-__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
+__global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx) {
 	const int rankBase = getRank() * VERTICES_POR_THREAD + start;
 
@@ -851,7 +859,7 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 							}
 							ExcessType delta = MIN(excess[v], resCap[a.id]);
 							if (delta > 0) {
-								if (jD == local_d + 1) {
+								if (jD > local_d) {
 									atomicAdd((unsigned long long *) &resCap[a.id], -delta);
 									atomicAdd((unsigned long long *) &excess[v], -delta);
 									atomicAdd((unsigned long long *) &resCap[a.reversa], delta);
@@ -874,7 +882,7 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 						}
 					}
 
-					if (excess[v] > 0 && minD < numVertices) {
+					if (excess[v] > 0 & minD < numVertices) {
 						jD = minD + 1;
 						dist[v] = jD;
 						ENQUEUE_DEVICE(v);
@@ -886,7 +894,6 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 			}
 		}
 	}
-
 }
 
 __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua) {

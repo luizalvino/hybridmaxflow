@@ -4,10 +4,10 @@
 
 #CFLAGS = --default-stream per-thread -O4
 #CFLAGS = -pg
-CFLAGS = -O4
+CFLAGS = -O4 -Xcompiler -fopenmp
 
 NVCC = nvcc
-HOST = ubuntu@ec2-52-8-103-243.us-west-1.compute.amazonaws.com
+HOST = ubuntu@ec2-52-8-16-239.us-west-1.compute.amazonaws.com
 
 compile:
 	$(NVCC) $(CFLAGS) -I$(VT_MPI_INC) $(THRUST_INC) -L$(VT_MPI_LIB) -Xptxas -v -arch sm_21 -lmpi -o run-pushrelabel-mpi-cuda max-flow-mpi-cuda.cu
