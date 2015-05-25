@@ -21,8 +21,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-// #define MAX_ADJ 10
-
 #define MIN(x, y) x < y ? x : y
 #define MAX(x, y) x > y ? x : y
 #define ENQUEUE(v) { \
@@ -507,7 +505,7 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMalloc(&grafo_tmp->excess, sizeof(ExcessType) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->resCap, sizeof(CapType) * numArestas) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->dist, sizeof(int) * numVertices) );
-		gpuErrchk( cudaMalloc(&grafo_tmp->ativo, sizeof(int) * numVertices) );
+		gpuErrchk( cudaMalloc(&grafo_tmp->ativo, sizeof(bool) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensAnt, sizeof(Mensagem) * numVizinhosAnt) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensProx, sizeof(Mensagem) * numVizinhosProx) );
 
@@ -516,7 +514,7 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->resCap, resCap, sizeof(CapType) * numArestas, cudaMemcpyHostToDevice, cs[4]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, dist, sizeof(int) * numVertices, cudaMemcpyHostToDevice, cs[5]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->arestas, arestas, sizeof(Aresta) * numArestas, cudaMemcpyHostToDevice, cs[6]) );
-		gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, ativo, sizeof(int) * numVertices, cudaMemcpyHostToDevice, cs[7]) );
+		gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, ativo, sizeof(bool) * numVertices, cudaMemcpyHostToDevice, cs[7]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, mensagensAnt, sizeof(Mensagem) * numVizinhosAnt, cudaMemcpyHostToDevice, cs[8]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, mensagensProx, sizeof(Mensagem) * numVizinhosProx, cudaMemcpyHostToDevice, cs[9]) );
 
@@ -541,6 +539,8 @@ typedef struct _Grafo {
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
 		int loop_size = 256 * num_blocos;
+		int loops = ceil(sqrt(num_blocos*256));
+		printf("loops = %d\n", loops);
 		// dim3 blocks = 128;
 
 		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
@@ -567,9 +567,8 @@ typedef struct _Grafo {
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
-			// tempo1 = second()
-			cudaEventRecord(start, 0);
-			for (int l = 0; l < 200; ++l) {
+			tempo1 = second();
+			for (int l = 0; l < 60; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
@@ -585,13 +584,9 @@ typedef struct _Grafo {
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 				}
 			}
-			cudaEventRecord(stop, 0);
-			cudaEventSynchronize(stop);
-			cudaEventElapsedTime(&elapsed, start, stop);
-			// gpuErrchk( cudaPeekAtLastError() );
-			// gpuErrchk( cudaDeviceSynchronize() );
-			// tempo2 += second() - tempo1;
-			tempo2 += (elapsed/1000);
+			gpuErrchk( cudaPeekAtLastError() );
+			gpuErrchk( cudaDeviceSynchronize() );
+			tempo2 += second() - tempo1;
 
 			tempoMsg = second();
 			if (i % 1 == 0) {
