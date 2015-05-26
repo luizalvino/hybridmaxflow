@@ -10,6 +10,7 @@
 #include "fila-cuda.cuh"
 #include <thrust/system/cpp/execution_policy.h>
 #include <cuda_runtime.h>
+#include <omp.h>
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -384,61 +385,67 @@ typedef struct _Grafo {
 		return false;
 	}
 
-	__host__ int bfs(Fila *bfsQ, int cycle) {
-		// printf("global update!\n");
+	__host__ int bfs() {
 		double time1 = second();
-		// Fila *bfsQ = new Fila;
-		bfsQ->reset();
+		int *f1 = (int *) malloc(sizeof(int) * numVertices);
+		int *f2 = (int *) malloc(sizeof(int) * numVertices);
+		int f1_size = 1;
+		int f2_size;
 		int aSize = 0;
 		int numMarcados = 0;
 		bool chegouFonte = false;
 
 		thrust::fill(dist + 1, dist + numVertices, numVertices);
 
-		bfsQ->enfileirar(numVertices - 1);
+		f1[0] = numVertices - 1;
 		dist[numVertices - 1] = 0;
 
-		// printf("bfs vai começar visitas!\n");
-		while(!bfsQ->vazia()) {
-			int v = bfsQ->desenfileirar();
-			if (ativo[v] && v != numVertices - 1) aSize++;
-			int novaDistancia = dist[v] + 1;
-			Vertice *vertice = vertices + v;
-
-			int inicial = vertice->inicial;
-			int stop = vertices[v].final;
-			int tam_adj = stop - inicial;
-			if (tam_adj <= 10) {
-				BFS_UNROLL_STEP(9);
-				BFS_UNROLL_STEP(8);
-				BFS_UNROLL_STEP(7);
-				BFS_UNROLL_STEP(6);
-				BFS_UNROLL_STEP(5);
-				BFS_UNROLL_STEP(4);
-				BFS_UNROLL_STEP(3);
-				BFS_UNROLL_STEP(2);
-				BFS_UNROLL_STEP(1);
-				BFS_UNROLL_STEP(0);
-			} else {
-				// #pragma omp parallel for
-				for (int i = inicial; i < stop; ++i) {
-					Aresta adj = arestas[i];
-					if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) {
-						dist[adj.to] = novaDistancia;
-						bfsQ->enfileirar(adj.to);
+		int k = 1;
+		while(f1_size > 0) {
+			// printf("f1 size %d\n", f1_size);
+			f2_size = 0;
+			#pragma omp parallel
+			{
+				int v, i, j, stop;
+				Vertice *vertice;
+				#pragma omp for nowait
+				for (i = 0; i < f1_size; i++) {
+					for (v = f1[i], vertice = vertices + v, j = vertice->inicial, stop = vertices[v].final; j < stop; ++j) {
+						Aresta adj = arestas[j];
+						if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) {
+							dist[adj.to] = k;
+							int index;
+							#pragma omp atomic capture
+							{
+								index = f2_size;
+								f2_size += 1;
+							}
+							f2[index] = adj.to;
+						}
 					}
 				}
 			}
+
+			int *tmp = f1;
+			f1 = f2;
+			f2 = tmp;
+			f1_size = f2_size;
+			k++;
 		}
 
 		if (*excessTotal > 0) {
-			for (int i = 1; i < numVertices - 1; ++i) {
-				if (dist[i] == numVertices && !marcado[i]) {
-					// printf("ativo[%d] = %d\n", i, ativo[i]);
-					numMarcados++;
-					marcado[i] = true;
-					ativo[i] = false;
-					(*excessTotal) -= excess[i];
+			#pragma omp parallel
+			{
+				#pragma omp for nowait
+				for (int i = 1; i < numVertices - 1; ++i) {
+					if (dist[i] == numVertices && !marcado[i]) {
+						// printf("ativo[%d] = %d\n", i, ativo[i]);
+						numMarcados++;
+						marcado[i] = true;
+						ativo[i] = false;
+						#pragma omp atomic
+						(*excessTotal) -= excess[i];
+					}
 				}
 			}
 		}
@@ -453,8 +460,7 @@ typedef struct _Grafo {
 
 	__host__ void maxFlowInit() {
 		double tempo1 = second();
-		Fila filaBfs;
-		bfs(&filaBfs, 0);
+		bfs();
 		thrust::sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
 		printf("bfs inicial tempo = %f\n", second() - tempo1);
 
@@ -474,9 +480,9 @@ typedef struct _Grafo {
 		// 	if (v == numVertices - 1) continue;
 		// 	ativo[v] = false;
 		// 	Discharge(v, filaAtivos);
-		// 	if (contador++ >= numVertices * 4) {
+		// 	if (contador++ >= numVertices * 2) {
 		// 		// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
-		// 		bfs(&filaBfs);
+		// 		bfs();
 		// 		if (achouFluxoMaximo()) break;
 		// 		contador = 0;
 		// 	}
@@ -491,7 +497,7 @@ typedef struct _Grafo {
 			gpuErrchk( cudaStreamCreate(cs + i) );
 		}
 		double tempo1 = second();
-		Grafo *grafo_d, *grafo_tmp;
+		Grafo *grafo_tmp;
 		Vertice *vertices_tmp;
 		Fila *filaAtivos_tmp, *filaProx_tmp;
 		gpuErrchk( cudaMallocHost(&grafo_tmp, sizeof(Grafo)) );
@@ -521,7 +527,6 @@ typedef struct _Grafo {
 		gpuErrchk( cudaDeviceSynchronize() );
 		printf("Tempo alocação = %f\n", second() - tempo1);
 		GrafoAloc grafo_aloc;
-		grafo_aloc.grafo_d = grafo_d;
 		grafo_aloc.grafo_tmp = grafo_tmp;
 		return grafo_aloc;
 	}
@@ -529,7 +534,6 @@ typedef struct _Grafo {
 	__host__ ExcessType fluxoTotalDevice(Grafo *grafo_h, Grafo *grafo_tmp, int rank, int nproc) {
 		bool *continuar;
 		int global_enviou;
-		Fila filaBfs;
 		ExcessType *fluxoTotal;
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0, tempoTotal = 0, tempoMsg = 0, tempoCopia = 0;
 		unsigned long long i = 0;
@@ -558,17 +562,13 @@ typedef struct _Grafo {
 
 		cudaDeviceSynchronize();
 
-		cudaEvent_t start, stop;
-		float elapsed;
-		cudaEventCreate(&start);
-		cudaEventCreate(&stop);
 		MPI_Barrier(MPI_COMM_WORLD);
 		tempoTotal = second();
 		do {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int l = 0; l < 60; ++l) {
+			for (int l = 0; l < 256; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
@@ -584,7 +584,7 @@ typedef struct _Grafo {
 						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
 				}
 			}
-			gpuErrchk( cudaPeekAtLastError() );
+			//gpuErrchk( cudaPeekAtLastError() );
 			gpuErrchk( cudaDeviceSynchronize() );
 			tempo2 += second() - tempo1;
 
@@ -597,7 +597,7 @@ typedef struct _Grafo {
 				// gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
 				gpuErrchk( cudaMemcpyAsync(grafo_h->excess, grafo_tmp->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[2]) );
 				gpuErrchk( cudaDeviceSynchronize() );
-				tempoTotal += second() - tempoCopia;
+				//tempoTotal += second() - tempoCopia;
 
 				if (nproc > 1) {
 					/*
@@ -637,7 +637,7 @@ typedef struct _Grafo {
 						}
 
 						double tempoSend = second();
-						double tempoSendTotal;
+						// double tempoSendTotal;
 						MPI_Sendrecv(&tam, 1, MPI_UNSIGNED_LONG, j, 0, &tam_rec, 1, MPI_UNSIGNED_LONG, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 						tempoTotal += second() - tempoSend;
 
@@ -675,7 +675,7 @@ typedef struct _Grafo {
 								grafo_h->ativo[a->to] = true;
 							}
 						}
-						tempoSendTotal = second() - tempoSend;
+						// tempoSendTotal = second() - tempoSend;
 						// printf("Total enviado de %d para %d = %llu | tempoSend = %f\n", j, rank, totalEnviado, tempoSendTotal);
 						enviouFluxo = enviouFluxo || totalEnviado > 0;
 					}
@@ -734,7 +734,7 @@ typedef struct _Grafo {
 						free(buffRecv);
 						tempo1 = second();
 						gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
-						grafo_h->bfs(&filaBfs, i);
+						grafo_h->bfs();
 						tempo3 += second() - tempo1;
 						tempoSend = second();
 						for (int j = 0; j < nproc - 1; j++) {
@@ -746,7 +746,7 @@ typedef struct _Grafo {
 				} else {
 					tempo1 = second();
 					gpuErrchk( cudaMemcpyAsync(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[0]) );
-					grafo_h->bfs(&filaBfs, i);
+					grafo_h->bfs();
 					// grafo_h->bfsDevice(this);
 					tempo3 += second() - tempo1;
 				}
@@ -791,7 +791,7 @@ typedef struct _Grafo {
 				gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
 				//gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
 				gpuErrchk( cudaDeviceSynchronize() );
-				tempoTotal += second() - tempoCopia;
+				//tempoTotal += second() - tempoCopia;
 			}
 			tempo4 += second() - tempoMsg;
 

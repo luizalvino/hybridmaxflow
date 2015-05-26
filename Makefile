@@ -2,12 +2,12 @@
 #VT_MPI_LIB = "/usr/lib/openmpi/lib/"
 #THRUST_INC = -I/home/alvino/Dropbox/private/mestrado/orientacao/2014/mpi+cuda/hibrid_cuda/include
 
-CFLAGS = --default-stream per-thread -O4
+# CFLAGS = --default-stream per-thread -O4
 #CFLAGS = -pg
-#CFLAGS = -O4 -Xcompiler -fopenmp -lineinfo
+CFLAGS = -O4 --default-stream per-thread -Xcompiler -fopenmp
 
 NVCC = nvcc
-HOST = ubuntu@ec2-52-8-15-172.us-west-1.compute.amazonaws.com
+HOST = ubuntu@ec2-52-8-167-21.us-west-1.compute.amazonaws.com
 
 compile:
 	$(NVCC) $(CFLAGS) -I$(VT_MPI_INC) $(THRUST_INC) -L$(VT_MPI_LIB) -Xptxas -v -arch sm_21 -lmpi -o run-pushrelabel-mpi-cuda max-flow-mpi-cuda.cu
