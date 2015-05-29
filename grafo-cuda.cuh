@@ -33,15 +33,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 		ativo[v] = true; \
 	} \
 }
-#define BFS_UNROLL_STEP(i) { \
-	if (i < tam_adj) { \
-		Aresta adj = arestas[i + inicial]; \
-		if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) { \
-			dist[adj.to] = novaDistancia; \
-			bfsQ->enfileirar(adj.to); \
-		} \
-	} \
-}
 
 __device__ int getRank() {
 	return blockIdx.y  * gridDim.x  * blockDim.z * blockDim.y * blockDim.x
@@ -124,7 +115,7 @@ typedef struct _Mensagem{
 typedef struct _Grafo Grafo;
 
 __global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
-	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx);
+	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal);
 __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua);
 __global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua);
 
@@ -274,43 +265,35 @@ typedef struct _Grafo {
 }
 
 	__host__ void Discharge(int v, Fila *filaAtivos) {
+		int current = vertices[v].inicial;
+		int stop = vertices[v].final;
 		do {
 			int i;
-			for (i = vertices[v].inicial; excess[v] > 0 && i < vertices[v].final; i++) {
-				Push(arestas + i, filaAtivos);
+			int minD = numVertices;
+			for (i = current; excess[v] > 0 && i < stop; ++i) {
+				Aresta adj = arestas[i];
+				if (resCap[adj.id] > 0 && dist[adj.to] < minD) {
+					minD = dist[adj.to];
+					current = i;
+				}
+				Push(&adj, filaAtivos);
 				if (excess[v] == 0) break;
 			}
-			if (i >= vertices[v].final) {
-				if (dist[v] == numVertices){break;}
-				int minD = numVertices;
-
-				for (i = vertices[v].inicial; i < vertices[v].final; i++) {
-					if (i < vertices[v].final) {
-						Aresta adj = arestas[i];
-						if (resCap[adj.id] > 0 && adj.from == v) {
-							int d_tmp = dist[adj.to];
-							d_tmp++;
-							if (d_tmp < minD) {
-								minD = d_tmp;
-							}
-						}
-					}
-				}
-
-				dist[v] = minD;
+			if (excess[v] > 0 && minD < numVertices) {
+				dist[v] = minD + 1;
 				ENQUEUE(v);
-
 				if (dist[v] == numVertices){break;}
 			} else {
 				break;
 			}
+			// printf("loopiando aqui %d | excess %lu | dist %d\n", v, excess[v], dist[v]);
 		} while (1);
 	}
 
 	__host__ void Push(Aresta *a, Fila *filaAtivos) {
 		if (resCap[a->id] > 0) {
 			ExcessType delta = MIN(excess[a->from], resCap[a->id]);
-			if (dist[a->from] > dist[a->to]) {
+			if (delta > 0 && dist[a->from] > dist[a->to]) {
 				resCap[a->id] -= delta;
 				resCap[a->reversa] += delta;
 				excess[a->to] += delta;
@@ -410,16 +393,11 @@ typedef struct _Grafo {
 				Vertice *vertice;
 				#pragma omp for nowait
 				for (i = 0; i < f1_size; i++) {
-					for (v = f1[i], vertice = vertices + v, j = vertice->inicial, stop = vertices[v].final; j < stop; ++j) {
+					for (v = f1[i], vertice = vertices + v, j = vertice->inicial, stop = vertice->final; j < stop; ++j) {
 						Aresta adj = arestas[j];
-						if (dist[adj.to] == numVertices && resCap[adj.reversa] > 0 && !marcado[adj.to]) {
+						if (resCap[adj.reversa] > 0 && dist[adj.to] == numVertices && !marcado[adj.to]) {
 							dist[adj.to] = k;
-							int index;
-							#pragma omp atomic capture
-							{
-								index = f2_size;
-								f2_size += 1;
-							}
+							int index = __sync_fetch_and_add(&f2_size, 1);
 							f2[index] = adj.to;
 						}
 					}
@@ -434,18 +412,15 @@ typedef struct _Grafo {
 		}
 
 		if (*excessTotal > 0) {
-			#pragma omp parallel
-			{
-				#pragma omp for nowait
-				for (int i = 1; i < numVertices - 1; ++i) {
-					if (dist[i] == numVertices && !marcado[i]) {
-						// printf("ativo[%d] = %d\n", i, ativo[i]);
-						numMarcados++;
-						marcado[i] = true;
-						ativo[i] = false;
-						#pragma omp atomic
-						(*excessTotal) -= excess[i];
-					}
+			for (int i = 1; i < numVertices - 1; ++i) {
+				if (dist[i] == numVertices && !marcado[i]) {
+					numMarcados++;
+					marcado[i] = true;
+					ativo[i] = false;
+					(*excessTotal) -= excess[i];
+				}
+				if (excess == 0) {
+					ativo[i] = false;
 				}
 			}
 		}
@@ -469,18 +444,20 @@ typedef struct _Grafo {
 
 		for (int i = vertices[0].inicial; i < vertices[0].final; ++i) {
 			Aresta *adjacente = arestas + i;
-			excess[0] += resCap[adjacente->id];
-			(*excessTotal) += excess[0];
-			Push(adjacente, filaAtivos);
+			if (resCap[adjacente->id] > 0) {
+				excess[0] += resCap[adjacente->id];
+				(*excessTotal) += excess[0];
+				Push(adjacente, filaAtivos);
+			}
 		}
 
 		// int contador = 0;
-		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 1500) {
+		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 256) {
 		// 	int v = filaAtivos->desenfileirar();
 		// 	if (v == numVertices - 1) continue;
 		// 	ativo[v] = false;
 		// 	Discharge(v, filaAtivos);
-		// 	if (contador++ >= numVertices * 2) {
+		// 	if (contador++ * 0.3 >= numVertices) {
 		// 		// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
 		// 		bfs();
 		// 		if (achouFluxoMaximo()) break;
@@ -512,8 +489,8 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMalloc(&grafo_tmp->resCap, sizeof(CapType) * numArestas) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->dist, sizeof(int) * numVertices) );
 		gpuErrchk( cudaMalloc(&grafo_tmp->ativo, sizeof(bool) * numVertices) );
-		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensAnt, sizeof(Mensagem) * numVizinhosAnt) );
-		gpuErrchk( cudaMalloc(&grafo_tmp->mensagensProx, sizeof(Mensagem) * numVizinhosProx) );
+		// gpuErrchk( cudaMalloc(&grafo_tmp->mensagensAnt, sizeof(Mensagem) * numVizinhosAnt) );
+		// gpuErrchk( cudaMalloc(&grafo_tmp->mensagensProx, sizeof(Mensagem) * numVizinhosProx) );
 
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->vertices, vertices_tmp, sizeof(Vertice) * numVertices, cudaMemcpyHostToDevice, cs[2]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, excess, sizeof(ExcessType) * numVertices, cudaMemcpyHostToDevice, cs[3]) );
@@ -521,8 +498,8 @@ typedef struct _Grafo {
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, dist, sizeof(int) * numVertices, cudaMemcpyHostToDevice, cs[5]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->arestas, arestas, sizeof(Aresta) * numArestas, cudaMemcpyHostToDevice, cs[6]) );
 		gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, ativo, sizeof(bool) * numVertices, cudaMemcpyHostToDevice, cs[7]) );
-		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, mensagensAnt, sizeof(Mensagem) * numVizinhosAnt, cudaMemcpyHostToDevice, cs[8]) );
-		gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, mensagensProx, sizeof(Mensagem) * numVizinhosProx, cudaMemcpyHostToDevice, cs[9]) );
+		// gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensAnt, mensagensAnt, sizeof(Mensagem) * numVizinhosAnt, cudaMemcpyHostToDevice, cs[8]) );
+		// gpuErrchk( cudaMemcpyAsync(grafo_tmp->mensagensProx, mensagensProx, sizeof(Mensagem) * numVizinhosProx, cudaMemcpyHostToDevice, cs[9]) );
 
 		gpuErrchk( cudaDeviceSynchronize() );
 		printf("Tempo alocação = %f\n", second() - tempo1);
@@ -538,13 +515,11 @@ typedef struct _Grafo {
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0, tempoTotal = 0, tempoMsg = 0, tempoCopia = 0;
 		unsigned long long i = 0;
 		int num_streams = 4;
-		int num_blocos = ceil((double)grafo_h->vertices_por_processo / (256 * num_streams)) / 2;
+		int num_blocos = ceil((double)(grafo_h->vertices_por_processo + 2) / (256 * num_streams)) / 2;
 		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
 		int loop_size = 256 * num_blocos;
-		int loops = ceil(sqrt(num_blocos*256));
-		printf("loops = %d\n", loops);
 		// dim3 blocks = 128;
 
 		cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
@@ -568,20 +543,20 @@ typedef struct _Grafo {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int l = 0; l < 256; ++l) {
+			for (int l = 0; l < 300; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
-						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
+						grafo_h->idInicial, grafo_h->idFinal);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[1]>>>(start + loop_size * 2, start + loop_size * (4), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
-						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
+						grafo_h->idInicial, grafo_h->idFinal);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[2]>>>(start + loop_size * 4, start + loop_size * (6), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
-						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
+						grafo_h->idInicial, grafo_h->idFinal);
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[3]>>>(start + loop_size * 6, start + loop_size * (8), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
-						grafo_h->idInicial, grafo_h->idFinal, grafo_tmp->mensagensAnt, grafo_tmp->mensagensProx);
+						grafo_h->idInicial, grafo_h->idFinal);
 				}
 			}
 			//gpuErrchk( cudaPeekAtLastError() );
@@ -788,9 +763,9 @@ typedef struct _Grafo {
 				}
 
 				gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[0]) );
-				gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
-				//gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
-				gpuErrchk( cudaDeviceSynchronize() );
+				//gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
+				// gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
+				// gpuErrchk( cudaDeviceSynchronize() );
 				//tempoTotal += second() - tempoCopia;
 			}
 			tempo4 += second() - tempoMsg;
@@ -814,7 +789,7 @@ typedef struct _Grafo {
 		// 		printf("rank %d | v %d | dist %d | excess %llu | ativo %d\n", idNum, i, dist[i], excess[i], ativo[i]);
 		// 	}
 		// }
-		printf("excess[%d] = %llu | excessTotal = %llu\n", numVertices - 1, excess[numVertices - 1], *excessTotal);
+		// printf("excess[%d] = %llu | excessTotal = %llu\n", numVertices - 1, excess[numVertices - 1], *excessTotal);
 		return excess[0] + excess[numVertices - 1] >= *excessTotal;
 	}
 
@@ -828,7 +803,7 @@ typedef struct _Grafo {
 #define VERTICES_POR_THREAD 2
 
 __global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
-	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal, Mensagem *mensagensAnt,	Mensagem *mensagensProx) {
+	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal) {
 	const int rankBase = getRank() * VERTICES_POR_THREAD + start;
 
 	#pragma unroll
@@ -858,16 +833,16 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restric
 									atomicAdd((unsigned long long *) &resCap[a.id], -delta);
 									atomicAdd((unsigned long long *) &excess[v], -delta);
 									atomicAdd((unsigned long long *) &resCap[a.reversa], delta);
-									if (a.to < idInicial) {
-										mensagensAnt[a.msgId].idAresta = a.id;
-										mensagensAnt[a.msgId].delta += delta;
-									} else if (a.to > idFinal) {
-										mensagensProx[a.msgId].idAresta = a.id;
-										mensagensProx[a.msgId].delta += delta;
-									} else {
-										atomicAdd((unsigned long long *) &excess[a.to], delta);
+									// if (a.to < idInicial) {
+									// 	mensagensAnt[a.msgId].idAresta = a.id;
+									// 	mensagensAnt[a.msgId].delta += delta;
+									// } else if (a.to > idFinal) {
+									// 	mensagensProx[a.msgId].idAresta = a.id;
+									// 	mensagensProx[a.msgId].delta += delta;
+									// } else {
+									atomicAdd((unsigned long long *) &excess[a.to], delta);
 										//excess[a.to] += delta;
-									}
+									// }
 									if (!ativo[a.to] && a.to != numVertices - 1) {
 										ENQUEUE_DEVICE(a.to);
 									}
