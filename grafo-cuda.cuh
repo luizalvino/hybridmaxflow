@@ -412,15 +412,20 @@ typedef struct _Grafo {
 		}
 
 		if (*excessTotal > 0) {
-			for (int i = 1; i < numVertices - 1; ++i) {
-				if (dist[i] == numVertices && !marcado[i]) {
-					numMarcados++;
-					marcado[i] = true;
-					ativo[i] = false;
-					(*excessTotal) -= excess[i];
-				}
-				if (excess == 0) {
-					ativo[i] = false;
+			#pragma omp parallel
+			{
+				#pragma omp for nowait
+				for (int i = 1; i < numVertices - 1; ++i) {
+					if (dist[i] == numVertices && !marcado[i]) {
+						numMarcados++;
+						marcado[i] = true;
+						ativo[i] = false;
+						#pragma omp atomic
+						(*excessTotal) -= excess[i];
+					}
+					if (excess == 0) {
+						ativo[i] = false;
+					}
 				}
 			}
 		}
@@ -515,7 +520,7 @@ typedef struct _Grafo {
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0, tempoTotal = 0, tempoMsg = 0, tempoCopia = 0;
 		unsigned long long i = 0;
 		int num_streams = 4;
-		int num_blocos = ceil((double)(grafo_h->vertices_por_processo + 2) / (256 * num_streams)) / 2;
+		int num_blocos = ceil((double)(grafo_h->vertices_por_processo) / (256 * num_streams)) / 2;
 		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
