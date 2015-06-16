@@ -7,7 +7,7 @@
 CFLAGS = -O4 --default-stream per-thread -Xcompiler -fopenmp
 
 NVCC = nvcc
-HOST = ubuntu@ec2-52-8-49-129.us-west-1.compute.amazonaws.com
+HOST = ubuntu@ec2-54-77-89-39.eu-west-1.compute.amazonaws.com
 
 compile:
 	$(NVCC) $(CFLAGS) -I$(VT_MPI_INC) $(THRUST_INC) -L$(VT_MPI_LIB) -Xptxas -v -arch sm_21 -lmpi -o run-pushrelabel-mpi-cuda max-flow-mpi-cuda.cu
@@ -20,3 +20,6 @@ sync:
 	ssh -i ../luizalvino-keypair-california.pem $(HOST) mkdir -p hibrid_cuda/pushrelabel-mpi-cuda-full/
 	# sobe dados
 	rsync --progress -zrave "ssh -i ../luizalvino-keypair-california.pem" ./ $(HOST):hibrid_cuda/pushrelabel-mpi-cuda-full/
+sync-samuel:
+	ssh samuel.ext.facom.ufms.br mkdir -p hibrid_cuda/pushrelabel-mpi-cuda-full/
+	rsync --progress -zrav ./ samuel.ext.facom.ufms.br:hibrid_cuda/pushrelabel-mpi-cuda-full/

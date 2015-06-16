@@ -12,6 +12,8 @@
 #include <cuda_runtime.h>
 #include <omp.h>
 
+using namespace std;
+
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -25,8 +27,12 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define MIN(x, y) x < y ? x : y
 #define MAX(x, y) x > y ? x : y
 #define ENQUEUE(v) { \
+	if (v != numVertices - 1) { \
 		ativo[v] = true; \
-		filaAtivos->enfileirar(v); \
+		buckets[dist[v]].push(v); \
+		if (dist[v] > maxD) maxD = dist[v]; \
+		if (dist[v] < aMin) aMin = dist[v]; \
+	} \
 }
 #define ENQUEUE_DEVICE(v) { \
 	if (excess[v] > 0) { \
@@ -45,6 +51,7 @@ __device__ int getRank() {
 
 typedef unsigned long long ExcessType;
 typedef unsigned long CapType;
+typedef vector< queue<int> > QueueArray;
 
 typedef struct _Aresta {
 	int from;
@@ -84,6 +91,19 @@ struct ComparaArestaFromDist {
 	}
 };
 
+struct ComparaVerticeDist {
+	int *dist;
+
+	ComparaVerticeDist(int *dist) {
+		this->dist = dist;
+	}
+
+	__host__ __device__
+	bool operator()(const int &v1, const int &v2) {
+		return dist[v1] > dist[v2];
+	}
+};
+
 typedef struct _Vertice {
 	int inicial;
 	int final;
@@ -114,7 +134,7 @@ typedef struct _Mensagem{
 
 typedef struct _Grafo Grafo;
 
-__global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
+__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal);
 __global__ void bfs_step(Grafo *grafo, bool *visitados, bool *ativos, bool *continua);
 __global__ void bfs_check(Grafo *grafo, bool *ativos, bool *continua);
@@ -264,19 +284,30 @@ typedef struct _Grafo {
 		}
 }
 
-	__host__ void Discharge(int v, Fila *filaAtivos) {
+	__host__ void Discharge(int v, QueueArray &buckets, int &maxD, int &aMin) {
 		int current = vertices[v].inicial;
 		int stop = vertices[v].final;
-		do {
+		while(excess[v] > 0 && dist[v] <= numVertices) {
 			int i;
 			int minD = numVertices;
 			for (i = current; excess[v] > 0 && i < stop; ++i) {
 				Aresta adj = arestas[i];
-				if (resCap[adj.id] > 0 && dist[adj.to] < minD) {
-					minD = dist[adj.to];
-					current = i;
+				if (resCap[adj.id] > 0) {
+					if (dist[adj.to] < minD) {
+						minD = dist[adj.to];
+						current = i;
+					}
+					ExcessType delta = MIN(excess[adj.from], resCap[adj.id]);
+					if (delta > 0 && dist[adj.from] == (dist[adj.to] + 1)) {
+						__sync_fetch_and_sub(&resCap[adj.id], delta);
+						__sync_fetch_and_add(&resCap[adj.reversa], delta);
+						__sync_fetch_and_add(&excess[adj.to], delta);
+						__sync_fetch_and_sub(&excess[adj.from], delta);
+						if (!ativo[adj.to]) {
+							ENQUEUE(adj.to);
+						}
+					}
 				}
-				Push(&adj, filaAtivos);
 				if (excess[v] == 0) break;
 			}
 			if (excess[v] > 0 && minD < numVertices) {
@@ -286,11 +317,10 @@ typedef struct _Grafo {
 			} else {
 				break;
 			}
-			// printf("loopiando aqui %d | excess %lu | dist %d\n", v, excess[v], dist[v]);
-		} while (1);
+		}
 	}
 
-	__host__ void Push(Aresta *a, Fila *filaAtivos) {
+	__host__ void Push(Aresta *a, QueueArray &buckets, int &maxD, int &aMin) {
 		if (resCap[a->id] > 0) {
 			ExcessType delta = MIN(excess[a->from], resCap[a->id]);
 			if (delta > 0 && dist[a->from] > dist[a->to]) {
@@ -305,7 +335,7 @@ typedef struct _Grafo {
 		}
 	}
 
-	__host__ void Relabel(int v, Fila *filaAtivos) {
+	__host__ void Relabel(int v, QueueArray buckets, int &maxD, int &aMin) {
 		int minD = numVertices;
 
 		int i;
@@ -377,6 +407,17 @@ typedef struct _Grafo {
 		int aSize = 0;
 		int numMarcados = 0;
 		bool chegouFonte = false;
+		int num_threads = 8;
+		omp_set_dynamic(0);
+		omp_set_num_threads(num_threads);
+		int *bucket[num_threads];
+		int bucket_size[num_threads];
+		int bucket_first[num_threads];
+		for (int i = 0; i < num_threads; ++i) {
+			bucket[i] = (int *) malloc(sizeof(int) * numVertices);
+			bucket_size[i] = 0;
+		}
+		printf("num threads = %d\n", num_threads);
 
 		thrust::fill(dist + 1, dist + numVertices, numVertices);
 
@@ -385,24 +426,34 @@ typedef struct _Grafo {
 
 		int k = 1;
 		while(f1_size > 0) {
-			// printf("f1 size %d\n", f1_size);
+			//printf("f1 size %d\n", f1_size);
 			f2_size = 0;
-			#pragma omp parallel
-			{
-				int v, i, j, stop;
-				Vertice *vertice;
-				#pragma omp for nowait
-				for (i = 0; i < f1_size; i++) {
-					for (v = f1[i], vertice = vertices + v, j = vertice->inicial, stop = vertice->final; j < stop; ++j) {
-						Aresta adj = arestas[j];
-						if (resCap[adj.reversa] > 0 && dist[adj.to] == numVertices && !marcado[adj.to]) {
-							dist[adj.to] = k;
-							int index = __sync_fetch_and_add(&f2_size, 1);
-							f2[index] = adj.to;
-						}
+			int v, i, j, stop;
+			Vertice *vertice;
+			#pragma omp parallel for private(v,j,stop)
+			for (i = 0; i < f1_size; i++) {
+				int tid = omp_get_thread_num();
+				for (v = f1[i], vertice = vertices + v, j = vertice->inicial, stop = vertice->final; j < stop; ++j) {
+					Aresta adj = arestas[j];
+					if (resCap[adj.reversa] > 0 && dist[adj.to] == numVertices && !marcado[adj.to]) {
+						dist[adj.to] = k;
+						int index = bucket_size[tid];
+						bucket[tid][index] = adj.to;
+						bucket_size[tid]++;
 					}
 				}
 			}
+
+			thrust::exclusive_scan(thrust::cpp::par, bucket_size, bucket_size + num_threads, bucket_first);
+
+			#pragma omp parallel for private(j)
+			for (i = 0; i < num_threads; i++) {
+				for (j = 0; j < bucket_size[i]; j++) {
+					f2[bucket_first[i] + j] = bucket[i][j];
+				}
+			}
+			f2_size = bucket_first[num_threads - 1] + bucket_size[num_threads - 1];
+			thrust::fill(thrust::cpp::par, bucket_size, bucket_size + num_threads, 0);
 
 			int *tmp = f1;
 			f1 = f2;
@@ -412,20 +463,12 @@ typedef struct _Grafo {
 		}
 
 		if (*excessTotal > 0) {
-			#pragma omp parallel
-			{
-				#pragma omp for nowait
-				for (int i = 1; i < numVertices - 1; ++i) {
-					if (dist[i] == numVertices && !marcado[i]) {
-						numMarcados++;
-						marcado[i] = true;
-						ativo[i] = false;
-						#pragma omp atomic
-						(*excessTotal) -= excess[i];
-					}
-					if (excess == 0) {
-						ativo[i] = false;
-					}
+			for (int i = 1; i < numVertices - 1; ++i) {
+				if (dist[i] == numVertices && !marcado[i]) {
+					numMarcados++;
+					marcado[i] = true;
+					ativo[i] = false;
+					(*excessTotal) -= excess[i];
 				}
 			}
 		}
@@ -444,33 +487,48 @@ typedef struct _Grafo {
 		thrust::sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
 		printf("bfs inicial tempo = %f\n", second() - tempo1);
 
-		Fila *filaAtivos = new Fila;
-		filaAtivos->init();
+		QueueArray buckets(numVertices + 1);
+		int maxD = 0;
+		int aMin = numVertices;
 
 		for (int i = vertices[0].inicial; i < vertices[0].final; ++i) {
 			Aresta *adjacente = arestas + i;
 			if (resCap[adjacente->id] > 0) {
 				excess[0] += resCap[adjacente->id];
 				(*excessTotal) += excess[0];
-				Push(adjacente, filaAtivos);
+				Push(adjacente, buckets, maxD, aMin);
 			}
 		}
 
-		// int contador = 0;
-		// while(filaAtivos->tamanho > 0 && filaAtivos->tamanho < 256) {
-		// 	int v = filaAtivos->desenfileirar();
-		// 	if (v == numVertices - 1) continue;
-		// 	ativo[v] = false;
-		// 	Discharge(v, filaAtivos);
-		// 	if (contador++ * 0.3 >= numVertices) {
-		// 		// printf("bfs init | tamFila = %d\n", filaAtivos->tamanho);
-		// 		bfs();
-		// 		if (achouFluxoMaximo()) break;
-		// 		contador = 0;
+		// int k = 0;
+		// while (maxD >= aMin) {
+		// 	queue<int> *l = &buckets[maxD];
+		// 	if (l->size() == 0) {
+		// 		maxD--;
+		// 	} else {
+		// 		int v = l->front();
+		// 		l->pop();
+		// 	 	ativo[v] = false;
+		// 	 	Discharge(v, buckets, maxD, aMin);
+		// 	 	if (maxD < aMin) break;
+		// 		if (k++ >= numVertices) {
+		// 	 		k = 0;
+		// 	 		maxD = 0;
+		// 	 		aMin = numVertices;
+		// 	 		bfs();
+		// 	 		for (int i = 0; i < numVertices; ++i) {
+		// 	 			if (ativo[i]) {
+		// 	 				if (dist[i] > maxD) maxD = dist[i];
+		// 	 				if (dist[i] < aMin) aMin = dist[i];
+		// 	 			}
+		// 	 		}
+		// 	 		if (achouFluxoMaximo()) break;
+		// 		}
 		// 	}
 		// }
 		printf("tempo maxFlowInit = %f\n", second() - tempo1);
-		printf("filaAtivos = %d\n", filaAtivos->tamanho);
+		printf("flow = %llu\n", excess[numVertices - 1]);
+		//printf("filaAtivos = %d\n", f1_size);
 	}
 
 	_GrafoAloc alocaGrafoDevice() {
@@ -520,7 +578,8 @@ typedef struct _Grafo {
 		double tempo1 = 0, tempo2 = 0, tempo3 = 0, tempo4 = 0, tempoTotal = 0, tempoMsg = 0, tempoCopia = 0;
 		unsigned long long i = 0;
 		int num_streams = 4;
-		int num_blocos = ceil((double)(grafo_h->vertices_por_processo) / (256 * num_streams)) / 2;
+		int num_blocos = ceil((double)(grafo_h->vertices_por_processo) / (256 * num_streams)) / 1;
+		//num_blocos = num_blocos > 1024 ? 1024 : num_blocos;
 		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
@@ -535,8 +594,8 @@ typedef struct _Grafo {
 		*fluxoTotal = 0;
 
 		printf("tempo inicial = %f\n", second() - tp1);
-		cudaStream_t streams[num_streams];
-		for (int s = 0; s < num_streams; ++s) {
+		cudaStream_t streams[4];
+		for (int s = 0; s < 4; ++s) {
 			gpuErrchk( cudaStreamCreate(&streams[s]) );
 		}
 
@@ -544,7 +603,7 @@ typedef struct _Grafo {
 
 		MPI_Barrier(MPI_COMM_WORLD);
 		tempoTotal = second();
-		do {
+		while(grafo_h->excess[grafo_h->numVertices - 1] < *grafo_h->excessTotal) {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
@@ -770,13 +829,13 @@ typedef struct _Grafo {
 				gpuErrchk( cudaMemcpyAsync(grafo_tmp->dist, grafo_h->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[0]) );
 				//gpuErrchk( cudaMemcpyAsync(grafo_tmp->ativo, grafo_h->ativo, sizeof(bool) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[1]) );
 				// gpuErrchk( cudaMemcpyAsync(grafo_tmp->excess, grafo_h->excess, sizeof(ExcessType) * grafo_h->numVertices, cudaMemcpyHostToDevice, streams[2]) );
-				// gpuErrchk( cudaDeviceSynchronize() );
+				gpuErrchk( cudaDeviceSynchronize() );
 				//tempoTotal += second() - tempoCopia;
 			}
 			tempo4 += second() - tempoMsg;
 
 			i++;
-		} while (1);
+		};
 		*fluxoTotal = *grafo_h->excessTotal;
 		tempoTotal = second() - tempoTotal;
 		printf("tempo pushrelabel_kernel: %f  i:%llu\n", tempo2, i);
@@ -794,7 +853,7 @@ typedef struct _Grafo {
 		// 		printf("rank %d | v %d | dist %d | excess %llu | ativo %d\n", idNum, i, dist[i], excess[i], ativo[i]);
 		// 	}
 		// }
-		// printf("excess[%d] = %llu | excessTotal = %llu\n", numVertices - 1, excess[numVertices - 1], *excessTotal);
+		printf("excess[%d] = %llu | excessTotal = %llu\n", numVertices - 1, excess[numVertices - 1], *excessTotal);
 		return excess[0] + excess[numVertices - 1] >= *excessTotal;
 	}
 
@@ -807,24 +866,24 @@ typedef struct _Grafo {
 
 #define VERTICES_POR_THREAD 2
 
-__global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restrict__ vertices, int numVertices, Aresta const* __restrict__ arestas, bool *ativo,
+__global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int numVertices, Aresta *arestas, bool *ativo,
 	ExcessType *excess, int *dist, CapType *resCap,	int idInicial, int idFinal) {
 	const int rankBase = getRank() * VERTICES_POR_THREAD + start;
 
 	#pragma unroll
 	for (int t = 0; t < VERTICES_POR_THREAD; ++t) {
 		int rank = rankBase + t;
-		if (rank < stop && rank <= idFinal) {
+		if (rank <= stop && rank <= idFinal) {
 			if (ativo[rank] && excess[rank] > 0) {
 				ativo[rank] = false;
 				int v = rank;
 				int jD = dist[v];
 				int current = vertices[v].inicial;
-				int stop = vertices[v].final;
+				int stopAdj = vertices[v].final;
 				while(excess[v] > 0 && jD < numVertices) {
 					int minD = numVertices;
-					#pragma unroll 2
-					for (int i = current; i < stop; ++i) {
+					#pragma unroll
+					for (int i = current; i < stopAdj; ++i) {
 						Aresta a = arestas[i];
 						if (resCap[a.id] > 0) {
 							int local_d = dist[a.to];
@@ -838,16 +897,7 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice const* __restric
 									atomicAdd((unsigned long long *) &resCap[a.id], -delta);
 									atomicAdd((unsigned long long *) &excess[v], -delta);
 									atomicAdd((unsigned long long *) &resCap[a.reversa], delta);
-									// if (a.to < idInicial) {
-									// 	mensagensAnt[a.msgId].idAresta = a.id;
-									// 	mensagensAnt[a.msgId].delta += delta;
-									// } else if (a.to > idFinal) {
-									// 	mensagensProx[a.msgId].idAresta = a.id;
-									// 	mensagensProx[a.msgId].delta += delta;
-									// } else {
 									atomicAdd((unsigned long long *) &excess[a.to], delta);
-										//excess[a.to] += delta;
-									// }
 									if (!ativo[a.to] && a.to != numVertices - 1) {
 										ENQUEUE_DEVICE(a.to);
 									}
