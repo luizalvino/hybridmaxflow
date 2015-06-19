@@ -3,7 +3,7 @@
 #THRUST_INC = -I/home/alvino/Dropbox/private/mestrado/orientacao/2014/mpi+cuda/hibrid_cuda/include
 
 # CFLAGS = --default-stream per-thread -O4
-#CFLAGS = -pg - Xcompiler -fopenmp
+#CFLAGS = -pg -lineinfo -Xcompiler -fopenmp
 CFLAGS = -O4 --default-stream per-thread -Xcompiler -fopenmp
 
 NVCC = nvcc
