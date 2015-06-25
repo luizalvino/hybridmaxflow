@@ -14,6 +14,10 @@
 
 using namespace std;
 
+/*
+	Eu estava tentando implementar a lista de inativos usando unordered_map
+*/
+
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -28,9 +32,13 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define MAX(x, y) x > y ? x : y
 #define ENQUEUE(v) { \
 	if (v != numVertices - 1) { \
-		ativo[v] = true; \
-		buckets[dist[v]].push(v); \
-		if (dist[v] > maxD) maxD = dist[v]; \
+		if (!ativo[v]) { \
+			ativo[v] = true; \
+			Vertice *v_tmp = vertices + v; \
+			Bucket *l_tmp = buckets + dist[v]; \
+			aAdd(l_tmp, v_tmp); \
+		} \
+		if (dist[v] > aMax) aMax = dist[v]; \
 		if (dist[v] < aMin) aMin = dist[v]; \
 	} \
 }
@@ -49,32 +57,33 @@ __device__ int getRank() {
 }
 
 
-#define ASIZE 30000
+#define ASIZE 16000
 
 typedef unsigned long long ExcessType;
 typedef unsigned long CapType;
-typedef vector< queue<int> > QueueArray;
 
 typedef struct _Vertice {
+	int index;
 	int inicial;
 	int final;
 	int current;
-	// struct _Vertice *bNext;
-	// struct _Vertice *bPrev;
+	struct _Vertice *bNext;
+	struct _Vertice *bPrev;
 } Vertice;
 
 typedef struct bucketSt {
 	Vertice *firstActive;
 	Vertice *firstInactive;
-} bucket;
+} Bucket;
 
 long i_dist;
 
 #define aAdd(l,i)\
 {\
+  /* printf("aAdd = %d\n", i->index); */\
   i->bNext = l->firstActive;\
   l->firstActive = i;\
-  i_dist = i->d;\
+  i_dist = dist[i->index];\
   if (i_dist < aMin)\
     aMin = i_dist;\
   if (i_dist > aMax)\
@@ -215,8 +224,13 @@ typedef struct _Grafo {
 	int idFinal;
 	int idNum;
 	int vertices_por_processo;
-	QueueArray buckets;
-	QueueArray ibuckets;
+	Bucket *buckets;
+	Vertice *sentinelNode;
+	long aMax;
+	long aMin;
+	long dMax;
+	int *f1;
+	int *f2;
 	int numVizinhosAnt;
 	int numVizinhosProx;
 	Mensagem *mensagensAnt;
@@ -227,23 +241,28 @@ typedef struct _Grafo {
 	void init(int _numVertices, int _numArestas, int rank, int nprocs) {
 		numVertices = _numVertices;
 		numArestas = 0;
-		vertices = new Vertice[_numVertices];
+		vertices = new Vertice[_numVertices + 1];
 		arestas = new Aresta[_numArestas * 2];
 		excess = new ExcessType[numVertices];
 		resCap = new CapType[_numArestas * 2];
 		dist = new int[numVertices];
 		ativo = new bool[numVertices];
 		marcado = new bool[numVertices];
-		buckets.resize(numVertices+1);
-		ibuckets.resize(numVertices+1);
+		buckets = new Bucket[numVertices+1];
+		sentinelNode = vertices + numVertices;
+		dMax = 0;
+		f1 = (int *) malloc(sizeof(int) * numVertices);
+		f2 = (int *) malloc(sizeof(int) * numVertices);
 
 		int i;
 		for (i = 0; i < numVertices; i++) {
+			vertices[i].index = i;
 			excess[i] = 0;
 			dist[i] = 0;
 			ativo[i] = false;
 			marcado[i] = false;
 		}
+		sentinelNode->index = numVertices;
 
 		excessTotal = new ExcessType;
 		*excessTotal = 0;
@@ -345,39 +364,58 @@ typedef struct _Grafo {
 		}
 	}
 
-	__host__ void Discharge(int v, int &maxD, int &aMin, long &k) {
-		int stop = vertices[v].final;
+	__host__ void Discharge(Vertice *v, long &k) {
+		int stop = v->final;
+		Bucket *l;
 		long jD;
 		do {
 			int i;
-			jD = dist[v] - 1;
-			for (i = vertices[v].current; i != stop; i++) {
+			jD = dist[v->index] - 1;
+			l = buckets + dist[v->index];
+			for (i = v->current; i != stop; i++) {
 				Aresta adj = arestas[i];
 				if (resCap[adj.id] > 0) {
 					if (jD == dist[adj.to]) {
 						ExcessType delta = MIN(excess[adj.from], resCap[adj.id]);
 						resCap[adj.id] -= delta;
 						resCap[adj.reversa] += delta;
+
+						if (adj.to != numVertices - 1) {
+							Bucket *lj = buckets + jD;
+
+							if (excess[adj.to] == 0) {
+								Vertice *j = (vertices + adj.to);
+								iDelete(lj, j);
+								aAdd(lj, j);
+								ativo[adj.to] = true;
+							}
+						}
+
 						excess[adj.from] -= delta;
 						excess[adj.to] += delta;
 						if (!ativo[adj.to]) {
 							ENQUEUE(adj.to);
 						}
-						if (excess[v] == 0) break;
+						if (excess[v->index] == 0) break;
 					}
 				}
 			}
-			if (excess[v] > 0) {
-				Relabel(v, maxD, aMin, k);
-				if (dist[v] == numVertices){break;}
+			if (excess[v->index] > 0) {
+				Relabel(v, k);
+				if (dist[v->index] == numVertices) break;
+				if ( (l->firstActive == sentinelNode) && (l->firstInactive == sentinelNode)) {
+					gap(l);
+				}
+				if (dist[v->index] == numVertices) break;
 			} else {
-				vertices[v].current = i;
+				v->current = i;
+				iAdd(l, v);
 				break;
 			}
 		} while (1);
 	}
 
-	__host__ void Push(Aresta *a, int &maxD, int &aMin) {
+	__host__ void Push(Aresta *a) {
 		if (resCap[a->id] > 0) {
 			ExcessType delta = MIN(excess[a->from], resCap[a->id]);
 			#pragma omp critical
@@ -395,15 +433,15 @@ typedef struct _Grafo {
 		}
 	}
 
-	__host__ void Relabel(int v, int &maxD, int &aMin, long &k) {
+	__host__ void Relabel(Vertice *v, long &k) {
 		int minD;
-		dist[v] = minD = numVertices;
+		dist[v->index] = minD = numVertices;
 
 		k += 12;
 
 		int i;
 		int minA;
-		for (i = vertices[v].inicial; i < vertices[v].final; i++) {
+		for (i = v->inicial; i < v->final; i++) {
 			k++;
 			Aresta *adj = arestas + i;
 			if (resCap[adj->id] > 0) {
@@ -417,14 +455,9 @@ typedef struct _Grafo {
 
 		minD++;
 		if (minD < numVertices) {
-			dist[v] = minD;
-			vertices[v].current = minA;
-			if (!ativo[v]) {
-				buckets[dist[v]].push(v);
-				ativo[v] = true;
-			}
-			if (dist[v] > maxD) maxD = dist[v];
-			if (dist[v] < aMin) aMin = dist[v];
+			dist[v->index] = minD;
+			v->current = minA;
+			ENQUEUE(v->index);
 		}
 	}
 
@@ -471,10 +504,40 @@ typedef struct _Grafo {
 		return false;
 	}
 
+
+	int gap(Bucket *emptyB)	{
+
+	    Bucket *l;
+	    Vertice *i;
+	    long r; /* index of the bucket before l  */
+	    int cc; /* cc = 1 if no nodes with positive excess before
+			      the gap */
+
+	    r = (emptyB - buckets) - 1;
+
+	    /* set labels of nodes beyond the gap to "infinity" */
+	    #pragma omp parallel for
+	    for (int k = 1; k <= dMax; k++) {
+	    	l = emptyB + k;
+	    //for (l = emptyB + 1; l <= buckets + dMax; l++) {
+	        for (i = l -> firstInactive; i != sentinelNode; i = i -> bNext) {
+	            dist[i->index] = numVertices;
+	        }
+
+	        l -> firstInactive = sentinelNode;
+	    }
+
+	    cc = (aMin > r) ? 1 : 0;
+
+	    dMax = r;
+	    aMax = r;
+
+	    return ( cc);
+
+	}
+
 	__host__ int bfs() {
 		double time1 = second();
-		int *f1 = (int *) malloc(sizeof(int) * numVertices);
-		int *f2 = (int *) malloc(sizeof(int) * numVertices);
 		int f1_size = 1;
 		int f2_size;
 		int aSize = 0;
@@ -487,15 +550,25 @@ typedef struct _Grafo {
 		int bucket_size[num_threads];
 		int bucket_first[num_threads];
 		for (int i = 0; i < num_threads; ++i) {
-			bucket[i] = (int *) malloc(sizeof(int) * numVertices);
+			bucket[i] = (int *) malloc(sizeof(int) * numVertices / 10);
 			bucket_size[i] = 0;
 		}
-		printf("num threads = %d\n", num_threads);
+		// printf("num threads = %d\n", num_threads);
 
-		thrust::fill(dist + 1, dist + numVertices, numVertices);
+		std::fill(dist, dist + numVertices, numVertices);
 
 		f1[0] = numVertices - 1;
 		dist[numVertices - 1] = 0;
+
+		for (Bucket *l = buckets; l <= buckets + dMax; l++) {
+			l -> firstActive = sentinelNode;
+	        l -> firstInactive = sentinelNode;
+	    }
+
+	    dMax = aMax = 0;
+	    aMin = numVertices;
+
+	    iAdd(buckets, (vertices + numVertices - 1));
 
 		int k = 1;
 		while(f1_size > 0) {
@@ -518,7 +591,7 @@ typedef struct _Grafo {
 				}
 			}
 
-			thrust::exclusive_scan(bucket_size, bucket_size + num_threads, bucket_first);
+			thrust::exclusive_scan(thrust::cpp::par, bucket_size, bucket_size + num_threads, bucket_first);
 
 			#pragma omp parallel for private(j)
 			for (i = 0; i < num_threads; i++) {
@@ -544,15 +617,18 @@ typedef struct _Grafo {
 					ativo[i] = false;
 					(*excessTotal) -= excess[i];
 				}
-				if (ativo[i]) {
-					buckets[dist[i]].push(i);
-				} else {
-					ibuckets[dist[i]].push(i);
+				if (dist[i] != numVertices) {
+					if (dist[i] > dMax) dMax = dist[i];
+					if (ativo[i] && excess[i] > 0 && i != numVertices - 1) {
+						aAdd((buckets + dist[i]), (vertices + i));
+					} else {
+						iAdd((buckets + dist[i]), (vertices + i));
+					}
 				}
 			}
 		}
 
-		dist[0] = numVertices;
+		// dist[0] = numVertices;
 
 		printf("tempo bfs = %f\n", second() - time1);
 		// printf("numVisitados = %d | aSize = %d | marcados = %d | chegouFonte = %d | e[0] = %llu | e[n-1] = %llu | excessTotal = %llu\n", numVisitados, aSize, numMarcados, chegouFonte, excess[0], excess[numVertices - 1], *excessTotal);
@@ -562,23 +638,55 @@ typedef struct _Grafo {
 
 	__host__ void maxFlowInit() {
 		double tempo1 = second();
-		bfs();
-		std::stable_sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
-		printf("bfs inicial tempo = %f\n", second() - tempo1);
+		// printf("bfs inicial tempo = %f\n", second() - tempo1);
 
-		int maxD = 0;
-		int aMin = numVertices;
+		bfs();
+		std::sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
+
+		for (Bucket *l = buckets; l <= buckets + numVertices - 1; l++) {
+	        l -> firstActive = sentinelNode;
+	        l -> firstInactive = sentinelNode;
+	    }
 
 		for (int i = vertices[0].inicial; i < vertices[0].final; ++i) {
 			Aresta *adjacente = arestas + i;
-			if (resCap[adjacente->id] > 0) {
-				excess[0] += resCap[adjacente->id];
-				(*excessTotal) += resCap[adjacente->id];
-				Push(adjacente, maxD, aMin);
+			if (adjacente->to != 0 && resCap[adjacente->id] > 0) {
+				CapType delta = resCap[adjacente->id];
+				resCap[adjacente->id] -= delta;
+				resCap[adjacente->reversa] += delta;
+				excess[adjacente->to] += delta;
+				(*excessTotal) += delta;
+				ativo[adjacente->to] = true;
 			}
 		}
 
-		pushrelabel_cpu();
+		Bucket *l = buckets + 1;
+
+		aMax = 0;
+		aMin = numVertices;
+
+		for (int i = 0; i < numVertices; i++) {
+			Vertice *v = vertices + i;
+			if (i == numVertices - 1) {
+				dist[i] = 0;
+				iAdd(buckets, v);
+				continue;
+			}
+			if (i == 0) {
+				dist[i] = numVertices;
+			} else {
+				dist[i] = 1;
+			}
+			if (excess[i] > 0) {
+				aAdd(l, v);
+			} else {
+				if (dist[i] < numVertices) {
+					iAdd(l, v);
+				}
+			}
+		}
+		dMax = 1;
+		// bfs();
 
 		printf("tempo maxFlowInit = %f\n", second() - tempo1);
 		printf("flow = %llu\n", excess[numVertices - 1]);
@@ -597,45 +705,31 @@ typedef struct _Grafo {
 	}
 
 	__host__ void pushrelabel_cpu() {
-		int maxD = 0;
-		int aMin = numVertices;
-
-		for (int i = 0; i < numVertices; ++i) {
-			if (excess[i] > 0) {
-				if (dist[i] > maxD) {
-					maxD = dist[i];
-				}
-				if (dist[i] < aMin) {
-					aMin = dist[i];
-				}
-			}
-		}
+		Vertice *v;
 
 		long k = 0;
 		int numAtivos;
-		while (maxD >= aMin) {
-			queue<int> *l = &buckets[maxD];
-			queue<int> *il = &ibuckets[maxD];
-			if (l->size() == 0) {
-				maxD--;
+		while (aMax >= aMin) {
+			Bucket *l = buckets + aMax;
+			v = l->firstActive;
+
+			if (v == sentinelNode) {
+				aMax--;
 			} else {
-				int v = l->front();
-				l->pop();
-			 	ativo[v] = false;
-			 	Discharge(v, maxD, aMin, k);
-			 	if (maxD < aMin) break;
+				aRemove(l, v);
+				// printf("discharge = %d | excess %llu | firstActive %d\n", v->index, excess[v->index], l->firstActive->index);
+
+			 	Discharge(v, k);
+			 	ativo[v->index] = false;
+
+			 	if (aMax < aMin) break;
+
 			 	long nm = (long) 6 * numVertices + (numArestas / 2);
-				if ( (k * 0.5) >= nm ) {
+				if ( (k * 1.5) >= nm ) {
 			 		k = 0;
-			 		maxD = 0;
-			 		aMin = numVertices;
 			 		bfs();
 			 		numAtivos = 0;
 			 		for (int i = 0; i < numVertices; ++i) {
-			 			if (ativo[i]) {
-			 				if (dist[i] > maxD) maxD = dist[i];
-			 				if (dist[i] < aMin) aMin = dist[i];
-			 			}
 			 			if (excess[i] > 0) numAtivos++;
 			 		}
 			 		printf("numAtivos cpu = %d\n", numAtivos);
@@ -653,11 +747,11 @@ typedef struct _Grafo {
 		double tempo1 = second();
 		Grafo *grafo_tmp;
 		Vertice *vertices_tmp;
-		Fila *filaAtivos_tmp, *filaProx_tmp;
+		// Fila *filaAtivos_tmp, *filaProx_tmp;
 		gpuErrchk( cudaMallocHost(&grafo_tmp, sizeof(Grafo)) );
 		gpuErrchk( cudaMallocHost(&vertices_tmp, sizeof(Vertice) * numVertices) );
-		gpuErrchk( cudaMallocHost(&filaAtivos_tmp, sizeof(Fila)) );
-		gpuErrchk( cudaMallocHost(&filaProx_tmp, sizeof(Fila)) );
+		// gpuErrchk( cudaMallocHost(&filaAtivos_tmp, sizeof(Fila)) );
+		// gpuErrchk( cudaMallocHost(&filaProx_tmp, sizeof(Fila)) );
 		memcpy(grafo_tmp, this, sizeof(Grafo));
 		memcpy(vertices_tmp, vertices, sizeof(Vertice) * numVertices);
 		gpuErrchk( cudaMalloc(&grafo_tmp->vertices, sizeof(Vertice) * numVertices) );
@@ -693,7 +787,7 @@ typedef struct _Grafo {
 		unsigned long long i = 0;
 		int num_streams = 4;
 		int num_blocos = ceil((double)(grafo_h->vertices_por_processo) / (256 * num_streams)) / 2;
-		//num_blocos = num_blocos > 1024 ? 1024 : num_blocos;
+		num_blocos = num_blocos > 1024 ? 1024 : num_blocos;
 		printf("num_blocks = %d\n", num_blocos);
 		dim3 threads_per_block = 256;
 		dim3 blocks = num_blocos;
@@ -717,6 +811,7 @@ typedef struct _Grafo {
 
 		MPI_Barrier(MPI_COMM_WORLD);
 		tempoTotal = second();
+		grafo_h->pushrelabel_cpu();
 		int numAtivos = grafo_h->numAtivos();
 		if (numAtivos > 0) {
 			gpuErrchk( cudaMemcpyAsync(grafo_tmp->resCap, grafo_h->resCap, sizeof(CapType) * grafo_h->numArestas, cudaMemcpyHostToDevice, streams[0]) );
@@ -971,7 +1066,8 @@ typedef struct _Grafo {
 			tempo4 += second() - tempoMsg;
 
 			i++;
-		};
+		}
+		grafo_h->bfs();
 		*fluxoTotal = *grafo_h->excessTotal;
 		tempoTotal = second() - tempoTotal;
 		printf("tempo pushrelabel_kernel: %f  i:%llu\n", tempo2, i);

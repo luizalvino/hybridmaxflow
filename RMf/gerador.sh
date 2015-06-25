@@ -6,3 +6,4 @@
 ./genrmf -a 48 -b 48 -c1 1 -c2 1000 -out genrmf_wide_48_48_1_1000
 ./genrmf -a 64 -b 64 -c1 1 -c2 1000 -out genrmf_wide_64_64_1_1000
 ./genrmf -a 128 -b 128 -c1 1 -c2 1000 -out genrmf_wide_128_128_1_1000
+./genrmf -a 136 -b 136 -c1 1 -c2 1000 -out genrmf_wide_136_136_1_1000
