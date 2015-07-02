@@ -14,10 +14,6 @@
 
 using namespace std;
 
-/*
-	Eu estava tentando implementar a lista de inativos usando unordered_map
-*/
-
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -57,7 +53,7 @@ __device__ int getRank() {
 }
 
 
-#define ASIZE 16000
+#define ASIZE 30000
 
 typedef unsigned long long ExcessType;
 typedef unsigned long CapType;
@@ -230,7 +226,6 @@ typedef struct _Grafo {
 	long aMin;
 	long dMax;
 	int *f1;
-	int *f2;
 	int numVizinhosAnt;
 	int numVizinhosProx;
 	Mensagem *mensagensAnt;
@@ -252,7 +247,6 @@ typedef struct _Grafo {
 		sentinelNode = vertices + numVertices;
 		dMax = 0;
 		f1 = (int *) malloc(sizeof(int) * numVertices);
-		f2 = (int *) malloc(sizeof(int) * numVertices);
 
 		int i;
 		for (i = 0; i < numVertices; i++) {
@@ -516,16 +510,19 @@ typedef struct _Grafo {
 	    r = (emptyB - buckets) - 1;
 
 	    /* set labels of nodes beyond the gap to "infinity" */
-	    #pragma omp parallel for
-	    for (int k = 1; k <= dMax; k++) {
-	    	l = emptyB + k;
-	    //for (l = emptyB + 1; l <= buckets + dMax; l++) {
-	        for (i = l -> firstInactive; i != sentinelNode; i = i -> bNext) {
-	            dist[i->index] = numVertices;
-	        }
+	    #pragma omp parallel
+	    {
+	    	#pragma omp for nowait
+		    for (int k = 1; k <= dMax; k++) {
+		    	l = emptyB + k;
+		    //for (l = emptyB + 1; l <= buckets + dMax; l++) {
+		        for (i = l -> firstInactive; i != sentinelNode; i = i -> bNext) {
+		            dist[i->index] = numVertices;
+		        }
 
-	        l -> firstInactive = sentinelNode;
-	    }
+		        l -> firstInactive = sentinelNode;
+		    }
+		}
 
 	    cc = (aMin > r) ? 1 : 0;
 
@@ -539,7 +536,6 @@ typedef struct _Grafo {
 	__host__ int bfs() {
 		double time1 = second();
 		int f1_size = 1;
-		int f2_size;
 		int aSize = 0;
 		int numMarcados = 0;
 		bool chegouFonte = false;
@@ -573,7 +569,6 @@ typedef struct _Grafo {
 		int k = 1;
 		while(f1_size > 0) {
 			//printf("f1 size %d\n", f1_size);
-			f2_size = 0;
 			int v, i, j, stop;
 			Vertice *vertice;
 			#pragma omp parallel for private(v,j,stop)
@@ -596,16 +591,11 @@ typedef struct _Grafo {
 			#pragma omp parallel for private(j)
 			for (i = 0; i < num_threads; i++) {
 				for (j = 0; j < bucket_size[i]; j++) {
-					f2[bucket_first[i] + j] = bucket[i][j];
+					f1[bucket_first[i] + j] = bucket[i][j];
 				}
 			}
-			f2_size = bucket_first[num_threads - 1] + bucket_size[num_threads - 1];
+			f1_size = bucket_first[num_threads - 1] + bucket_size[num_threads - 1];
 			thrust::fill(thrust::cpp::par, bucket_size, bucket_size + num_threads, 0);
-
-			int *tmp = f1;
-			f1 = f2;
-			f2 = tmp;
-			f1_size = f2_size;
 			k++;
 		}
 
