@@ -1,0 +1,19 @@
+c
+c hi_pr version 3.6
+c Copyright C by IG Systems, igsys@eclipse.net
+c
+c nodes:           166224
+c arcs:            805220
+c
+c flow:           310114.0
+c time:              0.94
+c cut tm:            0.83
+c
+c Solution checks (feasible and optimal)
+c
+c pushes:         2702608
+c relabels:       1410479
+c updates:              9
+c gaps:              8807
+c gap nodes:        67850
+c

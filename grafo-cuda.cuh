@@ -53,7 +53,9 @@ __device__ int getRank() {
 }
 
 
-#define ASIZE 30000
+#define ASIZE 16000
+
+__device__ int dMaxD = 0;
 
 typedef unsigned long long ExcessType;
 typedef unsigned long CapType;
@@ -157,19 +159,6 @@ struct ComparaArestaFromDist {
 	}
 };
 
-struct ComparaVerticeDist {
-	int *dist;
-
-	ComparaVerticeDist(int *dist) {
-		this->dist = dist;
-	}
-
-	__host__ __device__
-	bool operator()(const int &v1, const int &v2) {
-		return dist[v1] > dist[v2];
-	}
-};
-
 typedef struct _LinhaArquivo {
 	int from;
 	int to;
@@ -246,7 +235,7 @@ typedef struct _Grafo {
 		buckets = new Bucket[numVertices+1];
 		sentinelNode = vertices + numVertices;
 		dMax = 0;
-		f1 = (int *) malloc(sizeof(int) * numVertices);
+		f1 = (int *) calloc(numVertices, sizeof(int));
 
 		int i;
 		for (i = 0; i < numVertices; i++) {
@@ -533,7 +522,7 @@ typedef struct _Grafo {
 
 	}
 
-	__host__ int bfs() {
+	__host__ int bfs(bool cpu) {
 		double time1 = second();
 		int f1_size = 1;
 		int aSize = 0;
@@ -546,7 +535,7 @@ typedef struct _Grafo {
 		int bucket_size[num_threads];
 		int bucket_first[num_threads];
 		for (int i = 0; i < num_threads; ++i) {
-			bucket[i] = (int *) malloc(sizeof(int) * numVertices / 10);
+			bucket[i] = (int *) malloc(sizeof(int) * numVertices);
 			bucket_size[i] = 0;
 		}
 		// printf("num threads = %d\n", num_threads);
@@ -556,10 +545,12 @@ typedef struct _Grafo {
 		f1[0] = numVertices - 1;
 		dist[numVertices - 1] = 0;
 
-		for (Bucket *l = buckets; l <= buckets + dMax; l++) {
-			l -> firstActive = sentinelNode;
-	        l -> firstInactive = sentinelNode;
-	    }
+		if (cpu) {
+			for (Bucket *l = buckets; l <= buckets + dMax; l++) {
+				l -> firstActive = sentinelNode;
+		        l -> firstInactive = sentinelNode;
+		    }
+		}
 
 	    dMax = aMax = 0;
 	    aMin = numVertices;
@@ -607,7 +598,7 @@ typedef struct _Grafo {
 					ativo[i] = false;
 					(*excessTotal) -= excess[i];
 				}
-				if (dist[i] != numVertices) {
+				if (dist[i] != numVertices && cpu) {
 					if (dist[i] > dMax) dMax = dist[i];
 					if (ativo[i] && excess[i] > 0 && i != numVertices - 1) {
 						aAdd((buckets + dist[i]), (vertices + i));
@@ -626,12 +617,35 @@ typedef struct _Grafo {
 		return (numMarcados == 0 && chegouFonte == 0) || aSize == 0;
 	}
 
+	__host__ void preparaBuckets() {
+		#pragma omp parallel for
+		for (int i = 0; i < numVertices; i++) {
+			Bucket *l = buckets + i;
+			l -> firstActive = sentinelNode;
+	        l -> firstInactive = sentinelNode;
+		}
+		for (int i = 1; i < numVertices - 1; ++i) {
+	    	if (dist[i] != numVertices) {
+	    		if (dist[i] > dMax) {
+	    			dMax = dist[i];
+	    		}
+	    		if (ativo[i] && excess[i] > 0 && i != numVertices - 1) {
+	    			aAdd((buckets + dist[i]), (vertices + i));
+	    		} else {
+	    			iAdd((buckets + dist[i]), (vertices + i));
+	    		}
+	    	}
+	    }
+	}
+
 	__host__ void maxFlowInit() {
 		double tempo1 = second();
 		// printf("bfs inicial tempo = %f\n", second() - tempo1);
 
-		bfs();
+		bfs(true);
+		double tempo2 = second();
 		std::sort(arestas, arestas + numArestas, ComparaArestaFromDist(dist));
+		printf("tempo sort by dist = %f\n", second() - tempo2);
 
 		for (Bucket *l = buckets; l <= buckets + numVertices - 1; l++) {
 	        l -> firstActive = sentinelNode;
@@ -717,7 +731,7 @@ typedef struct _Grafo {
 			 	long nm = (long) 6 * numVertices + (numArestas / 2);
 				if ( (k * 1.5) >= nm ) {
 			 		k = 0;
-			 		bfs();
+			 		bfs(true);
 			 		numAtivos = 0;
 			 		for (int i = 0; i < numVertices; ++i) {
 			 			if (excess[i] > 0) numAtivos++;
@@ -814,7 +828,8 @@ typedef struct _Grafo {
 			// printf("i:%d\n", i);
 			*continuar = false;
 			tempo1 = second();
-			for (int l = 0; l < 100; ++l) {
+			cudaMemset(&dMaxD, 0, sizeof(int));
+			for (int l = 0; l < 98; ++l) {
 				for (int start = grafo_h->idInicial; start <= grafo_h->idFinal; start += loop_size * 8) {
 					pushrelabel_kernel<<<blocks, threads_per_block, 0, streams[0]>>>(start, start + loop_size * (2), grafo_tmp->vertices,
 						grafo_h->numVertices, grafo_tmp->arestas, grafo_tmp->ativo, grafo_tmp->excess, grafo_tmp->dist, grafo_tmp->resCap,
@@ -980,7 +995,7 @@ typedef struct _Grafo {
 						free(buffRecv);
 						tempo1 = second();
 						gpuErrchk( cudaMemcpy(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost) );
-						grafo_h->bfs();
+						grafo_h->bfs(true);
 						tempo3 += second() - tempo1;
 						tempoSend = second();
 						for (int j = 0; j < nproc - 1; j++) {
@@ -992,13 +1007,14 @@ typedef struct _Grafo {
 				} else {
 					tempo1 = second();
 					// gpuErrchk( cudaMemcpyAsync(grafo_h->dist, grafo_tmp->dist, sizeof(int) * grafo_h->numVertices, cudaMemcpyDeviceToHost, streams[0]) );
-					grafo_h->bfs();
+					grafo_h->bfs(false);
 					tempo3 += second() - tempo1;
 					numAtivos = grafo_h->numAtivos();
 					printf("numAtivos = %d\n", numAtivos);
 					bool cpu = false;
 					if (numAtivos < ASIZE) {
 						cpu = true;
+						grafo_h->preparaBuckets();
 						grafo_h->pushrelabel_cpu();
 						numAtivos = grafo_h->numAtivos();
 						if (numAtivos == 0) break;
@@ -1057,7 +1073,7 @@ typedef struct _Grafo {
 
 			i++;
 		}
-		grafo_h->bfs();
+		// grafo_h->bfs(false);
 		*fluxoTotal = *grafo_h->excessTotal;
 		tempoTotal = second() - tempoTotal;
 		printf("tempo pushrelabel_kernel: %f  i:%llu\n", tempo2, i);
@@ -1129,7 +1145,7 @@ __global__ void pushrelabel_kernel(int start, int stop, Vertice *vertices, int n
 						}
 					}
 
-					if (excess[v] > 0 & minD < numVertices) {
+					if (excess[v] > 0 && minD < numVertices) {
 						jD = minD + 1;
 						dist[v] = jD;
 						ENQUEUE_DEVICE(v);
