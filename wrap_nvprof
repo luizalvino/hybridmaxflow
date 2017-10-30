@@ -1,2 +1,0 @@
-#!/bin/bash
-nvprof -o profile.$OMPI_COMM_WORLD_RANK $*

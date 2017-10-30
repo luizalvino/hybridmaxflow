@@ -96,24 +96,3 @@ __device__ double secondDevice() {
 
 __device__ int fila_index;
 __device__ Fila novaFila;
-
-// __global__ void init() {
-// 	novaFila.init();
-// }
-
-// __global__
-//  void queue_kernel(Fila *fila) {
-// 	int rank = getRank();
-
-// 	if (rank < fila->tamanho) {
-// 		int value = fila->valores[rank];
-// 		if (value % 3 == 0 && value % 2 == 0 && value % 4 == 0 && value % 5 == 0) {
-// 			novaFila.enfileirarDevice(value);
-// 		}
-// 	}
-// }
-
-// __global__
-//  void imprimir() {
-// 	novaFila.imprimir();
-// }

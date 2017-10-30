@@ -1,2 +1,0 @@
-export VT_MPI_INC="/usr/lib/openmpi/include/"
-export VT_MPI_LIB="/usr/lib/openmpi/lib/"
